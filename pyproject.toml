@@ -17,3 +17,6 @@ platforms = ["osx-arm64"]
 treakens = { path = ".", editable = true }
 
 [tool.pixi.tasks]
+
+[tool.pixi.dependencies]
+pre-commit = ">=4.3.0,<5"
