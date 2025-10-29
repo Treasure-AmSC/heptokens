@@ -1,0 +1,19 @@
+[project]
+authors = [{name = "Samuel Klein", email = "samuel.byrne.klein@gmail.com"}]
+dependencies = []
+name = "treakens"
+requires-python = ">= 3.11"
+version = "0.1.0"
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.pypi-dependencies]
+treakens = { path = ".", editable = true }
+
+[tool.pixi.tasks]
