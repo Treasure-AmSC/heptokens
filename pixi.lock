@@ -364,7 +364,7 @@ packages:
 - pypi: ./
   name: treakens
   version: 0.1.0
-  sha256: 88c466beb0703f8aa0dc0408980a3b4e943eccc8539b190b25ee6be1a81b7748
+  sha256: a97fd1a0e8f329c34ed7cfbd12a846ee458a4c949cdf8dd69fbb3461e436a26e
   requires_python: '>=3.11'
   editable: true
 - conda: https://conda.anaconda.org/conda-forge/noarch/typing_extensions-4.15.0-pyhcf101f3_0.conda
