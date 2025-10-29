@@ -1,5 +1,5 @@
 [project]
-name = "treakens"
+name = "gdig"
 version = "0.1.0"
 authors = [{ name = "Samuel Klein", email = "samuel.byrne.klein@gmail.com" }]
 requires-python = ">=3.11"
@@ -14,7 +14,7 @@ channels = ["pytorch", "nvidia", "conda-forge", "pypi"]
 platforms = ["linux-64", "osx-arm64"]
 
 [tool.pixi.pypi-dependencies]
-treakens = { path = ".", editable = true }
+gdig = { path = ".", editable = true }
 
 [tool.pixi.dependencies]
 pre-commit = ">=4.3.0,<5"

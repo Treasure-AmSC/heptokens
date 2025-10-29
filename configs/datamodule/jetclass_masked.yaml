@@ -3,10 +3,10 @@ defaults:
 
 # Load the same as datamodule/jetclass.yaml but add masking step to the transforms
 transforms:
-  - _target_: treakens.data.preprocessing.mask_batch
+  - _target_: gdig.data.preprocessing.mask_batch
     _partial_: True
     mask_fraction: 0.5
-  - _target_: treakens.data.preprocessing.preprocess_batch
+  - _target_: gdig.data.preprocessing.preprocess_batch
     _partial_: True
     cst_fn:
       _target_: joblib.load
