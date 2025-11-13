@@ -1,19 +1,7 @@
 ---
-_target_: gdig.models.classifier.Classifier
-backbone_path: set/me/please.pkl
-class_head:
-  _target_: mltools.mltools.transformers.ClassAttentionPooling
-  _partial_: true
-  num_layers: 2
-  dim: 128
-  layer_config:
-    attn_config:
-      num_heads: 4
-    ff_config:
-      mult: 1
-      dropout: 0.2
+# TODO: set the actual model set up!
 optimizer:
-  _target_: mltools.mltools.optimisers.AdamWS
+  _target_: gdig.models.optimisers.AdamWS
   _partial_: true
   lr: 5.0e-4
   betas: [0.9, 0.95]

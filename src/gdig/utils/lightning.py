@@ -11,7 +11,6 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR, OneCycleLR
 
 from .torch_utils import (
-    get_sched,
     to_numpy,
 )
 
@@ -134,31 +133,6 @@ def one_cycle(
         total_steps=total_steps,
         max_lr=optimizer.param_groups[0]["lr"],
     )
-
-
-def standard_optim_sched(model: LightningModule) -> dict:
-    """Configure the optimizers and learning rate sheduler.
-
-    In favour of deprecating this in the future, as it is overly verbose.
-    """
-    # Finish initialising the partialy created methods
-    opt = model.hparams.optimizer(filter(lambda p: p.requires_grad, model.parameters()))
-
-    # Use mltools to initialise the scheduler
-    # as we can sync the cycle length with the number of steps per epoch
-    sched = get_sched(
-        model.hparams.sched_config.mltools,
-        opt,
-        steps_per_epoch=len(model.trainer.datamodule.train_dataloader()),
-        max_epochs=model.trainer.max_epochs,
-        max_steps=model.trainer.max_steps,
-    )
-
-    # Return the dict for the lightning trainer
-    return {
-        "optimizer": opt,
-        "lr_scheduler": {"scheduler": sched, **model.hparams.sched_config.lightning},
-    }
 
 
 def simple_optim_sched(model: LightningModule) -> dict:

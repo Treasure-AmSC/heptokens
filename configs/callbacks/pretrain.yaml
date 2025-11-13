@@ -6,7 +6,7 @@ lr_monitor:
   _target_: lightning.pytorch.callbacks.LearningRateMonitor
   logging_interval: step
 activation_monitor:
-  _target_: mltools.mltools.lightning_utils.ActivationMonitor
+  _target_: gdig.callbacks.monitor.ActivationMonitor
   logging_interval: 200
   layer_regex:
     - .*\.sa.fn$

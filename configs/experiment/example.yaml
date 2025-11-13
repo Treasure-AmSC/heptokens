@@ -2,7 +2,3 @@
 # @package _global_
 defaults:
   - override /model: ssfm
-encoder_config:
-  dim: 64
-decoder_config:
-  dim: 64
