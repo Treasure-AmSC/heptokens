@@ -1,9 +1,7 @@
 """Basic training script."""
 
 import logging
-from pathlib import Path
 
-import h5py
 import hydra
 import lightning.pytorch as pl
 import torch as T

@@ -847,7 +847,7 @@ packages:
 - pypi: ./
   name: gdig
   version: 0.1.0
-  sha256: b5e42c82474e730f8a9405cdbb400f7e93552019ad9e6d96cc321996acfdd76e
+  sha256: a5eab6a425c0713846641d3bfbaf714e6a60fb938335c65278da1b576757f59a
   requires_python: '>=3.11'
   editable: true
 - conda: https://conda.anaconda.org/conda-forge/linux-64/giflib-5.2.2-hd590300_0.conda
