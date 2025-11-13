@@ -4,10 +4,9 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import matplotlib.pyplot as plt
+import mplhep as hep
 import numpy as np
 import pandas as pd
-
-import mplhep as hep
 
 plt.style.use(hep.style.ROOT)
 
@@ -63,9 +62,7 @@ def load_jets_table(h5_path: Path) -> pd.DataFrame:
     try:
         import h5py  # Imported lazily to avoid unnecessary hard dependency on CLI usage.
     except ImportError as exc:
-        raise ImportError(
-            "h5py is required to read the jets table but is not installed."
-        ) from exc
+        raise ImportError("h5py is required to read the jets table but is not installed.") from exc
 
     with h5py.File(h5_path, "r") as handle:
         jets_table = handle["jets"]
@@ -179,9 +176,7 @@ def make_histograms(
         plt.close(fig)
 
 
-def compute_numeric_bin_edges(
-    vmin: float, vmax: float, dtype: np.dtype, bins: int
-) -> np.ndarray:
+def compute_numeric_bin_edges(vmin: float, vmax: float, dtype: np.dtype, bins: int) -> np.ndarray:
     if not np.isfinite(vmin) or not np.isfinite(vmax) or np.isclose(vmin, vmax):
         return np.empty(0)
 
@@ -249,17 +244,12 @@ def plot_track_histograms(
             vmin = min(vmin, float(sample.min()))
             vmax = max(vmax, float(sample.max()))
 
-        bin_edges = compute_numeric_bin_edges(
-            vmin, vmax, tracks_ds.dtype[feature], bins
-        )
+        bin_edges = compute_numeric_bin_edges(vmin, vmax, tracks_ds.dtype[feature], bins)
         if bin_edges.size == 0:
             continue
 
         bin_widths = np.diff(bin_edges)
-        counts = {
-            pdg: np.zeros(len(bin_edges) - 1, dtype=np.float64)
-            for pdg in FLAVOUR_LABELS
-        }
+        counts = {pdg: np.zeros(len(bin_edges) - 1, dtype=np.float64) for pdg in FLAVOUR_LABELS}
         totals = {pdg: 0 for pdg in FLAVOUR_LABELS}
 
         for start in range(0, slice_length, chunk_size):

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
 import h5py
+
 from gdig.utils import (
     TRUTH_LABEL_COL,
     load_jets_table,
@@ -76,9 +78,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     jets_df = load_jets_table(args.input)
-    make_histograms(
-        jets_df, args.output_dir, args.bins, args.density, args.dpi, args.dataset_name
-    )
+    make_histograms(jets_df, args.output_dir, args.bins, args.density, args.dpi, args.dataset_name)
     # Get the jet lables
     jet_labels = jets_df[TRUTH_LABEL_COL].astype(int).to_numpy()
     # Load the

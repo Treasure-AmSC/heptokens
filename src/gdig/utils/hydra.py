@@ -106,9 +106,7 @@ def print_config(
         (
             queue.append(field)
             if field in cfg
-            else log.warning(
-                f"Field '{field}' not found in config. Skipping '{field}' printing..."
-            )
+            else log.warning(f"Field '{field}' not found in config. Skipping '{field}' printing...")
         )
 
     # add all the other fields to queue (not specified in `print_order`)
@@ -156,9 +154,7 @@ def save_config(cfg: OmegaConf) -> None:
 
 
 @rank_zero_only
-def log_hyperparameters(
-    cfg: DictConfig, model: LightningModule, trainer: Trainer
-) -> None:
+def log_hyperparameters(cfg: DictConfig, model: LightningModule, trainer: Trainer) -> None:
     """Pass the config dict to the trainer's logger.
 
     Also calculates and logs the number of parameters

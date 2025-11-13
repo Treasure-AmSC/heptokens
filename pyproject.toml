@@ -31,3 +31,18 @@ mplhep = ">=0.4.1,<0.5"
 [tool.pixi.tasks]
 # Define useful developer tasks (optional)
 lint = "pre-commit run --all-files"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (includes F401 - unused imports)
+    "I",   # isort
+]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["gdig"]
