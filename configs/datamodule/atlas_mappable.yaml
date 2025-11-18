@@ -1,0 +1,33 @@
+---
+_target_: gdig.data.atlas_mappable.SingleFileMapModule
+
+# Data path
+data_path: /Users/samklein/data/mc-flavtag-ttbar-small.h5
+
+# Split ratios (must sum to 1.0)
+train_frac: 0.7
+val_frac: 0.15
+test_frac: 0.15
+
+# Random seed for reproducible splits
+seed: 42
+
+# Number of classes
+n_classes: 3
+
+# DataLoader settings
+num_workers: 6
+batch_size: 1000
+pin_memory: true
+# Optional transforms (instantiated separately)
+transforms:
+# Dataset-specific config (passed to MapDataset via **data_config)
+jet_features: [pt, mass]
+cst_features:
+  - pt
+  - deta
+  - dphi
+  - d0
+# Optional limits
+num_jets:  # Use all jets
+num_csts:  # Use all constituents per jet

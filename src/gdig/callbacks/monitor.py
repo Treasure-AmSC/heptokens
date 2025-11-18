@@ -7,7 +7,7 @@ from typing import Any
 from lightning import Callback, LightningModule, Trainer
 from torch.optim import Optimizer
 
-from .torch_utils import (
+from gdig.utils.torch_utils import (
     get_activations,
     get_submodules,
     gradient_norm,

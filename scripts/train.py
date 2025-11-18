@@ -1,13 +1,14 @@
 """Basic training script."""
 
 import logging
+import warnings
 
 import hydra
 import lightning.pytorch as pl
 import torch as T
 from omegaconf import DictConfig
 
-from src.gdig.utils.hydra import (
+from gdig.utils.hydra import (
     instantiate_collection,
     log_hyperparameters,
     print_config,
@@ -17,6 +18,8 @@ from src.gdig.utils.hydra import (
 )
 
 log = logging.getLogger(__name__)
+# Suppress torchvision image library warnings (we don't use image functionality)
+warnings.filterwarnings("ignore", message="Failed to load image Python extension")
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="train.yaml")

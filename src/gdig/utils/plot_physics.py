@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+import h5py
 import matplotlib.pyplot as plt
 import mplhep as hep
 import numpy as np
@@ -17,6 +18,38 @@ FLAVOUR_LABELS: Dict[int, str] = {
     0: "light",
 }
 TRUTH_LABEL_COL = "HadronConeExclTruthLabelID"
+JET_FEATURES: Tuple[str, ...] = (
+    "pt_btagJes",
+    "GN2v01_pb",
+    "GN2v01_pc",
+    "GN2v01_pu",
+    "GN2v01_ptau",
+    "DL1dv01_pu",
+    "DL1dv01_pc",
+    "DL1dv01_pb",
+    "eta_btagJes",
+    "pt",
+    "mass",
+    "ptFromTruthJet",
+    "etaFromTruthJet",
+    "phiFromTruthJet",
+    "mFromTruthJet",
+    "deltaEtaToTruthJet",
+    "deltaPhiToTruthJet",
+    "PartonTruthLabelPt",
+    "eta",
+    "phi",
+    "PartonTruthLabelDR",
+    "isJvtPU",
+    "isJvtHS",
+    "matchedToTruthJet",
+    "HadronConeExclTruthLabelID",
+    "HadronConeExclExtendedTruthLabelID",
+    "HadronGhostTruthLabelID",
+    "HadronGhostExtendedTruthLabelID",
+    "PartonTruthLabelID",
+    "eventNumber",
+)
 TRACK_FEATURES: Tuple[str, ...] = (
     "valid",
     "d0",
@@ -189,7 +222,7 @@ def compute_numeric_bin_edges(vmin: float, vmax: float, dtype: np.dtype, bins: i
 
 
 def plot_track_histograms(
-    tracks_ds: np.ndarray,
+    tracks_ds: "h5py.Dataset",
     jet_labels: np.ndarray,
     output_dir: Path,
     bins: int,

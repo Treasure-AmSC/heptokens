@@ -5,13 +5,13 @@ defaults:
   - _self_
   - hydra: default
   - callbacks: pretrain
-  - datamodule: jetclass_masked
+  - datamodule: atlas_mappable
   - model: classifier
   - experiment:
 seed: 42  # For reproducibility
 project_name: test_project  # Determines output directory path and wandb project
 network_name: test  # Used for both saving and wandb
-output_dir: /srv/beegfs/scratch/groups/rodem/jetssl-lite/  # Base output directory
+output_dir: /Users/samklein/code/gold_diggers/results  # TODO: put in shared space?
 ckpt_path:  # Checkpoint path to resume training
 weight_ckpt_path:  # Checkpoint path to load weights (but not optimizers etc)
 save_test_preds: false  # After training, save test predictions to disk
@@ -40,8 +40,8 @@ trainer:
   default_root_dir: ${full_path}
   # Below are useful for pretraining!
   reload_dataloaders_every_n_epochs: 1  # Allows the streaming dataloader to resume mid-epoch
-  val_check_interval: 5_000  # ~ 1 hour on an ampere gpu
-  limit_val_batches: 500  # Dont need 5M validation samples
+  val_check_interval: 5_000
+  limit_val_batches: 500  # Often don't need to run full val for pretraining
 # Logger settings
 logger:
   _target_: lightning.pytorch.loggers.wandb.WandbLogger
@@ -54,5 +54,5 @@ logger:
   save_dir: ${full_path}
   resume: ${full_resume}
 # Interpolated paths
-root_dir: ${oc.env:PROJECT_ROOT}
+root_dir: .
 full_path: ${output_dir}/${project_name}/${network_name}/

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import h5py
 
-from gdig.utils import (
+from gdig.utils.plot_physics import (
     TRUTH_LABEL_COL,
     load_jets_table,
     make_histograms,
