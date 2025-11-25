@@ -15,7 +15,6 @@ from omegaconf import DictConfig
 from tqdm import tqdm
 
 from gdig.utils.hydra import (
-    instantiate_collection,
     print_config,
     reload_original_config,
 )
@@ -202,20 +201,12 @@ def profile_with_trainer(cfg, datamodule, num_epochs: int = 5):
     # Create profiling callback
     profiling_callback = ProfilingCallback()
 
-    # Instantiate existing callbacks and filter out ModelCheckpoint
-    existing_callbacks = instantiate_collection(cfg.callbacks)
-    # Remove ModelCheckpoint since we're disabling checkpointing
-    filtered_callbacks = [
-        cb for cb in existing_callbacks if not isinstance(cb, pl.callbacks.ModelCheckpoint)
-    ]
-    all_callbacks = filtered_callbacks + [profiling_callback]
-
     # Use actual trainer config from Hydra for realistic profiling
     # Disable checkpointing and logger to focus on dataloader performance
     trainer = hydra.utils.instantiate(
         cfg.trainer,
         max_epochs=num_epochs,
-        callbacks=all_callbacks,
+        callbacks=profiling_callback,
         enable_checkpointing=False,
         logger=False,
     )
