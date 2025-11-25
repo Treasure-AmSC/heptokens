@@ -43,12 +43,16 @@ class MapDataset(Dataset):
         # Load constituent-level data from the tracks table
         with h5py.File(file_path, mode="r") as handle:
             tracks_ds = handle["tracks"]
-            # Build array of shape (num_jets, num_csts, num_features)
-            self.data_dict["csts"] = np.stack(
-                [tracks_ds[key][:num_jets, :num_csts] for key in cst_features],
-                axis=-1,
+            # Load the slice once
+            tracks_slice = tracks_ds[:num_jets, :num_csts]
+            # Pre-allocate and fill (more memory efficient)
+            num_features = len(cst_features)
+            self.data_dict["csts"] = np.empty(
+                (tracks_slice.shape[0], tracks_slice.shape[1], num_features), dtype=np.float32
             )
-            self.data_dict["mask"] = tracks_ds["valid"][:num_jets, :num_csts]
+            for i, key in enumerate(cst_features):
+                self.data_dict["csts"][:, :, i] = tracks_slice[key]
+            self.data_dict["mask"] = tracks_slice["valid"]
 
         self.num_jets = self._get_num_jets(num_jets)
         self.num_csts = self._get_num_csts(num_csts)
