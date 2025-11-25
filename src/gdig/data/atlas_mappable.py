@@ -45,13 +45,15 @@ class MapDataset(Dataset):
             tracks_ds = handle["tracks"]
             # Load the slice once
             tracks_slice = tracks_ds[:num_jets, :num_csts]
-            # Pre-allocate and fill (more memory efficient)
+            # Pre-allocate and fill constituent features array
             num_features = len(cst_features)
             self.data_dict["csts"] = np.empty(
                 (tracks_slice.shape[0], tracks_slice.shape[1], num_features), dtype=np.float32
             )
+            # Fill constituent features
             for i, key in enumerate(cst_features):
                 self.data_dict["csts"][:, :, i] = tracks_slice[key]
+            # Load validity mask
             self.data_dict["mask"] = tracks_slice["valid"]
 
         self.num_jets = self._get_num_jets(num_jets)
