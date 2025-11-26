@@ -3,7 +3,7 @@ name = "gdig"
 version = "0.1.0"
 authors = [{ name = "Samuel Klein", email = "samuel.byrne.klein@gmail.com" }]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["torchpq>=0.3.0.6,<0.4", "snakemake>=9.13.7,<10", "snakemake-executor-plugin-slurm>=2.0.0,<3"]
 
 [build-system]
 requires = ["hatchling"]
@@ -18,10 +18,6 @@ gdig = { path = ".", editable = true }
 
 [tool.pixi.dependencies]
 pre-commit = ">=4.3.0,<5"
-# PyTorch with CUDA support
-pytorch = { version = ">=2.4", channel = "pytorch" }
-torchvision = { version = ">=0.19", channel = "pytorch" }
-torchaudio = { version = ">=2.4", channel = "pytorch" }
 lightning = ">=2.5.5,<3"
 omegaconf = ">=2.3.0,<3"
 h5py = ">=3.13.0,<4"
@@ -31,6 +27,15 @@ pandas = ">=2.3.3,<3"
 rich = ">=14.2.0,<15"
 wandb = ">=0.22.3,<0.23"
 scikit-learn = ">=1.3.1,<2"
+# PyTorch (shared across platforms)
+pytorch = { version = ">=2.4", channel = "pytorch" }
+torchvision = { version = ">=0.19", channel = "pytorch" }
+torchaudio = { version = ">=2.4", channel = "pytorch" }
+
+# Platform-specific dependencies
+[tool.pixi.target.linux-64.dependencies]
+pytorch-cuda = { version = "12.1.*", channel = "pytorch" }
+cupy = { version = ">=13.0.0" }
 
 [tool.pixi.tasks]
 # Define useful developer tasks (optional)

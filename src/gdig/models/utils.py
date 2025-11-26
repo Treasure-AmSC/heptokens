@@ -58,22 +58,19 @@ def linear_warmup_cosine_decay(
 class JetBackbone(nn.Module):
     """Generalised backbone for the jet models.
 
-    Simply wraps the constituent embedding, constituent id embedding and encoder
-    together in a single module.
+    Simply wraps the constituent embedding and encoder together in a single module.
     Easy for saving and loading using the pickle module.
     """
 
     def __init__(
         self,
         cst_emb: nn.Module,
-        cst_id_emb: nn.Module,
         jet_emb: nn.Module,
-        encoder,  # type: Transformer
+        encoder,  # type: Transformer  # TODO: write this class!
         causal: bool = False,
     ) -> None:
         super().__init__()
         self.cst_emb = cst_emb
-        self.cst_id_emb = cst_id_emb
         self.jet_emb = jet_emb
         self.encoder = encoder
         self.causal = causal
@@ -83,12 +80,11 @@ class JetBackbone(nn.Module):
     def forward(
         self,
         csts: T.Tensor,
-        csts_id: T.Tensor,
         mask: T.Tensor,
         jets: T.Tensor,
     ) -> T.Tensor:
         """Pass through the complete backbone."""
-        csts = self.cst_emb(csts) + self.cst_id_emb(csts_id)
+        csts = self.cst_emb(csts)
         jets = self.jet_emb(jets)
         x = self.encoder(csts, mask=mask, ctxt=jets, causal=self.causal)
         new_mask = self.encoder.get_combined_mask(mask)  # Registers

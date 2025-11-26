@@ -40,6 +40,13 @@ class MapDataset(Dataset):
         # Load jet-level data from the jets table
         jets_table = load_jets_table(file_path)
         self.data_dict["jets"] = jets_table[self.jet_features].to_numpy()[:num_jets]
+        # Set the truth labels as targets
+        labels = jets_table["PartonTruthLabelID"].to_numpy()[:num_jets]
+        # Convert labels based on unique values to a contiguous range starting at 0
+        # TODO: is this the correct thing to do?
+        unique_labels = np.unique(labels)
+        label_map = {label: i for i, label in enumerate(unique_labels)}
+        self.data_dict["labels"] = np.array([label_map[label] for label in labels])
         # Load constituent-level data from the tracks table
         with h5py.File(file_path, mode="r") as handle:
             tracks_ds = handle["tracks"]

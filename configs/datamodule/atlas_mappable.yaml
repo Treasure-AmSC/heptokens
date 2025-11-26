@@ -2,7 +2,7 @@
 _target_: gdig.data.atlas_mappable.SingleFileMapModule
 
 # Data path
-data_path: /Users/samklein/data/mc-flavtag-ttbar-small.h5
+data_path: /sdf/scratch/users/s/samklein/data/atlas/mc-flavtag-ttbar-small.h5
 
 # Split ratios (must sum to 1.0)
 train_frac: 0.7
@@ -19,7 +19,7 @@ n_classes: 3
 num_workers: 6
 batch_size: 1000
 pin_memory: true
-# Optional transforms (instantiated separately)
+# Optional transforms (instantiated separately)  TODO: implement this
 transforms:
 # Dataset-specific config (passed to MapDataset via **data_config)
 jet_features: [pt, mass]

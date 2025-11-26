@@ -1,0 +1,7 @@
+---
+_target_: gdig.models.kmeans.LitMinibatchKMeans
+n_clusters: 128
+distance: euclidean    # or "cosine", "manhattan"
+init_mode: kmeans++    # or "random"
+log_every_n_steps: 10
+verbose: 1

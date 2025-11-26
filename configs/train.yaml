@@ -11,7 +11,7 @@ defaults:
 seed: 42  # For reproducibility
 project_name: test_project  # Determines output directory path and wandb project
 network_name: test  # Used for both saving and wandb
-output_dir: /Users/samklein/code/gold_diggers/results  # TODO: put in shared space?
+output_dir: /sdf/group/mli/samklein/code/gold_diggers/results  # TODO: put in shared space?
 ckpt_path:  # Checkpoint path to resume training
 weight_ckpt_path:  # Checkpoint path to load weights (but not optimizers etc)
 save_test_preds: false  # After training, save test predictions to disk
@@ -32,8 +32,7 @@ trainer:
   precision: bf16-mixed
   max_epochs: 1
   enable_progress_bar: true
-  gradient_clip_val: 1
-  check_val_every_n_epoch: 1
+  check_val_every_n_epoch:
   accelerator: auto
   devices: 1
   num_nodes: 1
