@@ -64,6 +64,44 @@ def preprocess_batch(
     return jet_dict
 
 
+def inverse_preprocess_batch(
+    jet_dict: dict[T.Tensor],
+    cst_fn: BaseEstimator,
+    jet_fn: BaseEstimator,
+) -> dict:
+    """Apply inverse preprocessing to a batch of jets.
+
+    Args:
+        jet_dict: Dictionary containing 'csts', 'jets', and 'mask' tensors
+        cst_fn: Fitted QuantileTransformer for constituents
+        jet_fn: Fitted QuantileTransformer for jets
+
+    Returns:
+        Dictionary with inverse-transformed constituents and jets
+    """
+    csts = jet_dict["csts"].clone()  # Clone to avoid modifying original
+    mask = jet_dict["mask"]
+    jets = jet_dict["jets"].clone()
+
+    # Inverse transform constituents
+    # Only transform valid (masked) constituents
+    if mask.any():
+        valid_csts = csts[mask].cpu().numpy()
+        inverse_csts = cst_fn.inverse_transform(valid_csts)
+        csts[mask] = T.from_numpy(inverse_csts).float()
+
+    # Inverse transform jets
+    inverse_jets = jet_fn.inverse_transform(jets.cpu().numpy())
+    jets = T.from_numpy(inverse_jets).float()
+
+    # Update dictionary
+    jet_dict_inverse = jet_dict.copy()
+    jet_dict_inverse["csts"] = csts
+    jet_dict_inverse["jets"] = jets
+
+    return jet_dict_inverse
+
+
 def mask_batch(
     jet_dict: dict,
     mask_fraction: float = 0.4,
