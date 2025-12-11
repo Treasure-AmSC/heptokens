@@ -1,0 +1,212 @@
+"""PyTorch Lightning wrapper for VQ-VAE with ResidualVQ."""
+
+import logging
+from typing import Dict, Tuple
+
+import torch
+from lightning import LightningModule
+from vector_quantize_pytorch import ResidualVQ
+
+from gdig.models.coders import Decoder, Encoder
+
+log = logging.getLogger(__name__)
+
+
+class LitVqVae(LightningModule):
+    """Lightning Module wrapper for VQ-VAE with ResidualVQ.
+
+    Args:
+        encoder_hidden_dims: List of hidden dimensions for encoder MLP
+        decoder_hidden_dims: List of hidden dimensions for decoder MLP
+        codebook_size: Number of codes in each codebook
+        codebook_dim: Dimension of each code
+        num_quantizers: Number of residual quantizers
+        commitment_weight: Weight for commitment loss
+        learning_rate: Learning rate for optimizer
+        reconstruction_weight: Weight for reconstruction loss
+        data_sample: Sample data for initialization (optional, for compatibility)
+        n_classes: Number of classes (optional, for compatibility)
+        **kwargs: Additional arguments passed to ResidualVQ
+    """
+
+    def __init__(
+        self,
+        encoder: Encoder,
+        decoder: Decoder,
+        codebook_size: int = 1024,
+        codebook_dim: int = 256,
+        num_quantizers: int = 8,
+        commitment_weight: float = 1.0,
+        learning_rate: float = 1e-3,
+        reconstruction_weight: float = 1.0,
+        data_sample: torch.Tensor = None,
+        **kwargs,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+
+        self.learning_rate = learning_rate
+        self.reconstruction_weight = reconstruction_weight
+
+        # Infer input dimension from data_sample if provided
+        if data_sample is not None:
+            input_dim = data_sample["csts"].shape[-1]
+        else:
+            input_dim = 3  # Default for now
+
+        # Declare encoder
+        self.encoder = encoder(input_dim=input_dim, output_dim=codebook_dim)
+        # Declare decoder
+        self.decoder = decoder(input_dim=codebook_dim, output_dim=input_dim)
+
+        # Vector quantization
+        self.vector_quantization = ResidualVQ(
+            dim=codebook_dim,
+            codebook_size=codebook_size,
+            num_quantizers=num_quantizers,
+            commitment=commitment_weight,
+        )
+
+    def encode(
+        self, batch: Dict[str, torch.Tensor]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Encode input data to quantized embeddings.
+
+        Args:
+            batch: Dictionary containing 'csts' tensor of shape [batch_size, n_csts, d_vector]
+                and 'mask' tensor of shape [batch_size, n_csts]
+
+        Returns:
+            z_q: Quantized embeddings of shape [n_valid, codebook_dim]
+            indices: Indices of shape [n_valid, num_quantizers]
+            commit_loss: Commitment loss tensor
+        """
+
+        # Encode
+        z_e = self.encoder(batch)  # [n_valid, codebook_dim]
+
+        # Quantize - add batch dim for ResidualVQ
+        z_e_batched = z_e.unsqueeze(0)  # [1, n_valid, codebook_dim]
+        z_q_batched, indices_batched, commit_loss = self.vector_quantization(z_e_batched)
+
+        # Remove batch dim
+        z_q = z_q_batched.squeeze(0)  # [n_valid, codebook_dim]
+        indices = indices_batched.squeeze(0)  # [n_valid, num_quantizers]
+
+        return z_q, indices, commit_loss.mean()
+
+    def decode(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Decode quantized embeddings.
+
+        Args:
+            z_q: Quantized embeddings [n_valid, codebook_dim]
+            batch: Original batch dict with 'csts' and 'mask'
+
+        Returns:
+            reconstructed_csts
+        """
+        # Decode
+        x_hat_valid = self.decoder(z_q)  # [n_valid, d_vector]
+        return x_hat_valid
+
+    def forward(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Predict cluster labels for input data.
+
+        Args:
+            batch: Dictionary containing 'csts' and 'mask'
+
+        Returns:
+            Indices of shape [batch_size, n_csts, num_quantizers]
+            Masked positions will have index -1
+        """
+        csts = batch["csts"]
+        mask = batch["mask"]
+
+        batch_size, n_csts, _ = csts.shape
+        num_quantizers = self.vector_quantization.num_quantizers
+
+        # Initialize output with -1 for masked positions
+        indices_full = torch.full(
+            (batch_size, n_csts, num_quantizers),
+            -1,
+            dtype=torch.long,
+            device=csts.device,
+        )
+
+        # Encode and get indices
+        _, indices, _ = self.encode(batch)
+
+        # Place indices back into full tensor
+        indices_full[mask] = indices
+
+        return indices_full
+
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+        """Training step with reconstruction and commitment loss.
+
+        Args:
+            batch: Dictionary containing data tensors
+            batch_idx: Index of current batch
+
+        Returns:
+            Total loss tensor
+        """
+        # Encode
+        z_q, indices, commit_loss = self.encode(batch)
+
+        # Compute reconstruction loss
+        recon_loss = self.decoder.compute_loss(z_q, batch)
+
+        # Total loss
+        total_loss = self.reconstruction_weight * recon_loss + commit_loss
+
+        # Log metrics
+        self.log("train/total_loss", total_loss, prog_bar=True)
+        self.log("train/recon_loss", recon_loss, prog_bar=True)
+        self.log("train/commit_loss", commit_loss, prog_bar=True)
+
+        # TODO: put this back later
+        # # Log codebook usage
+        # unique_codes_per_quantizer = []
+        # for q in range(indices.shape[-1]):
+        #     unique_codes = indices[:, q].unique().numel()
+        #     unique_codes_per_quantizer.append(unique_codes)
+        #     self.log(f"train/unique_codes_q{q}", float(unique_codes))
+
+        # self.log(
+        #     "train/avg_unique_codes",
+        #     float(sum(unique_codes_per_quantizer) / len(unique_codes_per_quantizer)),
+        # )
+
+        return total_loss
+
+    def validation_step(
+        self, batch: Dict[str, torch.Tensor], batch_idx: int
+    ) -> Dict[str, torch.Tensor]:
+        """Validation step."""
+        # Encode
+        z_q, indices, commit_loss = self.encode(batch)
+
+        # Compute reconstruction loss
+        recon_loss = self.decoder.compute_loss(z_q, batch)
+
+        # TODO: plot some reconstructions?
+        # reconstruction = self.decode(z_q, batch)
+
+        # Total loss
+        total_loss = self.reconstruction_weight * recon_loss + commit_loss
+
+        # Log metrics
+        self.log("val/total_loss", total_loss, prog_bar=True)
+        self.log("val/recon_loss", recon_loss, prog_bar=True)
+        self.log("val/commit_loss", commit_loss, prog_bar=True)
+
+        return {"val_loss": total_loss, "indices": indices}
+
+    def predict_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+        """Predict step returns indices."""
+        return self(batch)
+
+    def configure_optimizers(self):
+        """Configure Adam optimizer."""
+        return torch.optim.Adam(self.parameters(), lr=self.learning_rate)

@@ -210,6 +210,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/ukkonen-1.0.1-py311hdf67eae_6.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/unicodedata2-17.0.0-py311h49ec1c0_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/urllib3-2.5.0-pyhd8ed1ab_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/vector-quantize-pytorch-0.2.2-pyhd8ed1ab_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/virtualenv-20.35.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/wandb-0.22.3-py311hcc66767_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/xorg-libxau-1.0.12-hb9d3cd8_0.conda
@@ -404,6 +405,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/ukkonen-1.0.1-py311h57a9ea7_6.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/unicodedata2-17.0.0-py311h9408147_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/urllib3-2.5.0-pyhd8ed1ab_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/vector-quantize-pytorch-0.2.2-pyhd8ed1ab_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/virtualenv-20.35.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/wandb-0.22.3-py311h0f0954d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/xorg-libxau-1.0.12-h5505292_0.conda
@@ -1170,7 +1172,7 @@ packages:
 - pypi: ./
   name: gdig
   version: 0.1.0
-  sha256: de0bce3c70d30cc22b531d143ff7e72031bb42f2d04651f8b84adb7b4b85f1e8
+  sha256: 52fe5029467789bcd2008b0ca6fffae9d63150e61ed87091cf953c9078f4f902
   requires_dist:
   - torchpq>=0.3.0.6,<0.4
   - snakemake>=9.13.7,<10
@@ -4525,6 +4527,18 @@ packages:
   - pkg:pypi/urllib3?source=hash-mapping
   size: 101735
   timestamp: 1750271478254
+- conda: https://conda.anaconda.org/conda-forge/noarch/vector-quantize-pytorch-0.2.2-pyhd8ed1ab_0.tar.bz2
+  sha256: 2f5c1b2902b5b3b285c51056c92c3b443c28bdda5395cd33bd31824122a894f1
+  md5: c8757d48cc819e5704cba49576fa26e2
+  depends:
+  - python >=3.6
+  - pytorch
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/vector-quantize-pytorch?source=hash-mapping
+  size: 7267
+  timestamp: 1631542392759
 - conda: https://conda.anaconda.org/conda-forge/noarch/virtualenv-20.35.3-pyhd8ed1ab_0.conda
   sha256: af9662662648f7f57c0a79afee98e393dacf68887c40aea1eec68b48afebb724
   md5: bf0dc4c8a32e91290e3fae5403798c63
