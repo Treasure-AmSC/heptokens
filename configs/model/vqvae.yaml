@@ -4,11 +4,9 @@ _target_: gdig.models.vq_vae.LitVqVae
 encoder:
   _target_: gdig.models.coders.Encoder
   _partial_: true
-  hidden_dims: [128, 256, 512]
 decoder:
   _target_: gdig.models.coders.Decoder
   _partial_: true
-  hidden_dims: [512, 256, 128]
 codebook_size: 1024
 codebook_dim: 256
 num_quantizers: 8

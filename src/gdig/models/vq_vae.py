@@ -83,15 +83,13 @@ class LitVqVae(LightningModule):
         """
 
         # Encode
-        z_e = self.encoder(batch)  # [n_valid, codebook_dim]
+        z_e = self.encoder(batch)  # [batch_size, n_csts, codebook_dim]
 
-        # Quantize - add batch dim for ResidualVQ
-        z_e_batched = z_e.unsqueeze(0)  # [1, n_valid, codebook_dim]
-        z_q_batched, indices_batched, commit_loss = self.vector_quantization(z_e_batched)
+        # Quantize
+        z_q, indices_batched, commit_loss = self.vector_quantization(z_e)
 
-        # Remove batch dim
-        z_q = z_q_batched.squeeze(0)  # [n_valid, codebook_dim]
-        indices = indices_batched.squeeze(0)  # [n_valid, num_quantizers]
+        # Move dimensions [n_codes, batch_dim, n_csts] -> [batch_dim, n_csts, n_codes]
+        indices = indices_batched.permute(1, 2, 0).contiguous()
 
         return z_q, indices, commit_loss.mean()
 
@@ -106,7 +104,7 @@ class LitVqVae(LightningModule):
             reconstructed_csts
         """
         # Decode
-        x_hat_valid = self.decoder(z_q)  # [n_valid, d_vector]
+        x_hat_valid = self.decoder(z_q, batch)  # [n_valid, d_vector]
         return x_hat_valid
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
