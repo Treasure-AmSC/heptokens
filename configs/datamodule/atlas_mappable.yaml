@@ -16,11 +16,19 @@ seed: 42
 n_classes: 3
 
 # DataLoader settings
-num_workers: 6
-batch_size: 1000
+num_workers: 4
+batch_size: 1024
 pin_memory: true
-# Optional transforms (instantiated separately)  TODO: implement this
+# Optional transforms (instantiated separately)  TODO: improve this
 transforms:
+  - _target_: gdig.data.preprocessing.preprocess_batch
+    _partial_: true
+    cst_fn:
+      _target_: joblib.load
+      filename: /sdf/scratch/users/s/samklein/data/atlas/resources/cst_quantiles.joblib
+    jet_fn:
+      _target_: joblib.load
+      filename: /sdf/scratch/users/s/samklein/data/atlas/resources/jet_quantiles.joblib
 # Dataset-specific config (passed to MapDataset via **data_config)
 jet_features: [pt, mass]
 cst_features:

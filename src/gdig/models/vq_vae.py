@@ -90,6 +90,8 @@ class LitVqVae(LightningModule):
 
         # Move dimensions [n_codes, batch_dim, n_csts] -> [batch_dim, n_csts, n_codes]
         indices = indices_batched.permute(1, 2, 0).contiguous()
+        # Set masked positions to -1
+        indices = indices.masked_fill(~batch["mask"].unsqueeze(-1), -1)
 
         return z_q, indices, commit_loss.mean()
 
@@ -117,27 +119,7 @@ class LitVqVae(LightningModule):
             Indices of shape [batch_size, n_csts, num_quantizers]
             Masked positions will have index -1
         """
-        csts = batch["csts"]
-        mask = batch["mask"]
-
-        batch_size, n_csts, _ = csts.shape
-        num_quantizers = self.vector_quantization.num_quantizers
-
-        # Initialize output with -1 for masked positions
-        indices_full = torch.full(
-            (batch_size, n_csts, num_quantizers),
-            -1,
-            dtype=torch.long,
-            device=csts.device,
-        )
-
-        # Encode and get indices
-        _, indices, _ = self.encode(batch)
-
-        # Place indices back into full tensor
-        indices_full[mask] = indices
-
-        return indices_full
+        return self.encode(batch)[1]
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Training step with reconstruction and commitment loss.
