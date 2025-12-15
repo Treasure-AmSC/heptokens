@@ -86,16 +86,16 @@ class ReconstructionMonitor(Callback):
                 original_feat = original_csts[:, feature_idx].cpu().numpy()
                 recon_feat = recon_csts[:, feature_idx].cpu().numpy()
 
-                plt.figure(figsize=(6, 6))
-                plt.scatter(original_feat, recon_feat, alpha=0.5, s=1)
-                plt.xlabel("Original Feature")
-                plt.ylabel("Reconstructed Feature")
-                plt.title(feature_idx)
-                plt.plot(
+                fig, ax = plt.subplots(figsize=(6, 6))
+                ax.scatter(original_feat, recon_feat, alpha=0.5, s=1)
+                ax.set_xlabel("Original Feature")
+                ax.set_ylabel("Reconstructed Feature")
+                ax.set_title(f"Feature {feature_idx}")
+                ax.plot(
                     [original_feat.min(), original_feat.max()],
                     [original_feat.min(), original_feat.max()],
                     "r--",
-                )  # y=x line
+                )
 
-                logger.log({f"val/recon_feature_{feature_idx}": wandb.Image(plt)})
-                plt.close()
+                logger.log({f"val/recon_feature_{feature_idx}": wandb.Image(fig)})
+                plt.close(fig)  # Close the specific figure
