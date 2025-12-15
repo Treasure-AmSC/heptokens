@@ -1,0 +1,33 @@
+---
+model_summary:
+  _target_: lightning.pytorch.callbacks.RichModelSummary
+  max_depth: 2
+lr_monitor:
+  _target_: lightning.pytorch.callbacks.LearningRateMonitor
+  logging_interval: step
+activation_monitor:
+  _target_: gdig.callbacks.monitor.ActivationMonitor
+  logging_interval: 200
+  layer_regex:
+    - .*\.sa.fn$
+    - .*\.ca.fn$
+    - .*\.ff.fn$
+    - .*\.gate$
+    - .*encoder.layers\.\d+$
+    - .*decoder.layers\.\d+$
+  param_regex: [.*\.gate$]
+checkpoint_per_epoch:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  dirpath: ${full_path}/checkpoints
+  filename: last
+  enable_version_counter: false
+  auto_insert_metric_name: false
+reconstruction_monitor:
+  _target_: gdig.callbacks.recon.ReconstructionMonitor
+  cst_fn:
+    _target_: joblib.load
+    filename: ${datamodule.transforms.0.cst_fn.filename}
+  jet_fn:
+    _target_: joblib.load
+    filename: ${datamodule.transforms.0.jet_fn.filename}
+  log_every_n_epochs: 1

@@ -512,3 +512,8 @@ def unsquash_fn(x: T.Tensor | np.ndarray, a: float) -> np.ndarray:
     x[x < 0] = 0  # Works on both tensors and numpy arrays
     x[x > 1] = 1
     return 1 - (1 - x**a) ** (1 / a)
+
+
+def dict_to_device(data_dict, device):
+    """Move all tensors in a dict to the specified device."""
+    return {k: v.to(device) if T.is_tensor(v) else v for k, v in data_dict.items()}
