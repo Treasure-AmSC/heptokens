@@ -1,0 +1,21 @@
+---
+# configs/model/vqvae.yaml
+_target_: gdig.models.vq_vae.LitVqVae
+encoder:
+  _target_: gdig.models.coders.Encoder
+  _partial_: true
+  model:
+    _target_: gdig.models.transformer.Transformer
+    _partial_: true
+    n_heads: 8
+decoder:
+  _target_: gdig.models.coders.Decoder
+  _partial_: true
+  model:
+    _target_: gdig.models.transformer.Transformer
+    _partial_: true
+    n_heads: 8
+codebook_size: 512
+codebook_dim: 6
+num_quantizers: 3
+learning_rate: 1e-3
