@@ -38,4 +38,4 @@ cst_features:
   - d0
 # Optional limits
 num_jets:  # Use all jets
-num_csts:  # Use all constituents per jet
+num_csts: 40  # Use all constituents per jet
