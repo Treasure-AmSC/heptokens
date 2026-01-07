@@ -1,10 +1,11 @@
 ---
+# configs/model/transformer_vqvae.yaml
 _target_: gdig.models.vq_vae.LitVqVae
 encoder:
   _target_: gdig.models.coders.Encoder
   _partial_: true
   model:
-    _target_: gdig.models.transformer.SetToVectorTransformer
+    _target_: gdig.models.transformer.Transformer
     _partial_: true
     d_model: 128
     n_heads: 8
@@ -13,12 +14,11 @@ encoder:
     dropout: 0.
     activation: gelu
 decoder:
-  _target_: gdig.models.coders.Decoder
+  _target_: gdig.models.coders.DiffusionDecoder
   _partial_: true
   model:
-    _target_: gdig.models.transformer.VectorToSetTransformer
+    _target_: gdig.models.transformer.Transformer
     _partial_: true
-    max_set_size: ${datamodule.num_csts}
     d_model: 128
     n_heads: 8
     num_layers: 4
@@ -26,6 +26,6 @@ decoder:
     dropout: 0.
     activation: gelu
 codebook_size: 512
-codebook_dim: 12
-num_quantizers: 5
+codebook_dim: 6
+num_quantizers: 3
 learning_rate: 1e-3
