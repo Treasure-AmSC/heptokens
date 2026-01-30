@@ -6,6 +6,8 @@ from sklearn.base import BaseEstimator
 from torch import nn
 from torch.utils.data import default_collate
 
+from gdig.models.vq_vae import LitVqVae
+
 
 def collate_and_transform(
     batch: Iterable[dict],
@@ -37,6 +39,34 @@ def tokenize_batch(
     jet_dict["tokens"] = T.zeros(mask.shape, dtype=T.long)
     jet_dict["tokens"][mask] = out
     return jet_dict
+
+
+class VqvaeTokenizer:
+    """Add VQ-VAE token IDs to the batch using a trained checkpoint."""
+
+    def __init__(self, ckpt_path: str) -> None:
+        self.ckpt_path = ckpt_path
+        self._model: LitVqVae | None = None
+
+    def _get_model(self) -> LitVqVae:
+        if self._model is None:
+            device = T.device("cuda" if T.cuda.is_available() else "cpu")
+            self._model = LitVqVae.load_from_checkpoint(self.ckpt_path, map_location=device)
+            self._model.to(device)
+            self._model.eval()
+        return self._model
+
+    def __call__(self, jet_dict: dict[T.Tensor]) -> dict:
+        model = self._get_model()
+        device = next(model.parameters()).device
+        with T.no_grad():
+            batch = {
+                k: (v.to(device) if isinstance(v, T.Tensor) else v) for k, v in jet_dict.items()
+            }
+            _, indices, _ = model.encode(batch)
+            # indices = indices.to("cpu")  # NOTE: this is needed if running in preprocessing.
+        jet_dict["tokens"] = indices
+        return jet_dict
 
 
 def preprocess_batch(

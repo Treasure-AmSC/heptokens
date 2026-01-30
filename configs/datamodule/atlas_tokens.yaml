@@ -1,0 +1,41 @@
+---
+_target_: gdig.data.atlas_mappable.SingleFileMapModule
+
+# Data path
+data_path: /sdf/scratch/users/s/samklein/data/atlas/mc-flavtag-ttbar-small.h5
+
+# Split ratios (must sum to 1.0)
+train_frac: 0.7
+val_frac: 0.15
+test_frac: 0.15
+seed: 42
+n_classes: 4
+
+# DataLoader settings
+num_workers: 3
+batch_size: 4096
+pin_memory: true
+
+# Labels and features
+label_key: HadronConeExclTruthLabelID
+jet_features: [pt, mass]
+cst_features:
+  - pt
+  - deta
+  - dphi
+  - d0
+# Add VqvaeTokenizer as a transform
+transforms:
+  - _target_: gdig.data.preprocessing.preprocess_batch
+    _partial_: true
+    cst_fn:
+      _target_: joblib.load
+      filename: /sdf/scratch/users/s/samklein/data/atlas/resources/cst_quantiles.joblib
+    jet_fn:
+      _target_: joblib.load
+      filename: /sdf/scratch/users/s/samklein/data/atlas/resources/jet_quantiles.joblib
+  # - _target_: gdig.data.preprocessing.VqvaeTokenizer
+  #   ckpt_path: /fs/ddn/sdf/group/atlas/d/jkrupa/treasure/gold_diggers/results/test_project/test/checkpoints/last.ckpt
+# Optional limits
+num_jets:
+num_csts:

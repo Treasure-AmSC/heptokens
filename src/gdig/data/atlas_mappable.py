@@ -24,6 +24,7 @@ class MapDataset(Dataset):
         file_path: str,
         jet_features: list | None = None,
         cst_features: list | None = None,
+        label_key: str = "HadronConeExclTruthLabelID",
         num_jets: int | None = None,
         num_csts: int | None = None,
     ) -> None:
@@ -41,7 +42,7 @@ class MapDataset(Dataset):
         jets_table = load_jets_table(file_path)
         self.data_dict["jets"] = jets_table[self.jet_features].to_numpy()[:num_jets]
         # Set the truth labels as targets
-        labels = jets_table["PartonTruthLabelID"].to_numpy()[:num_jets]
+        labels = jets_table[label_key].to_numpy()[:num_jets]
         # Convert labels based on unique values to a contiguous range starting at 0
         # TODO: is this the correct thing to do?
         unique_labels = np.unique(labels)
@@ -65,7 +66,7 @@ class MapDataset(Dataset):
 
         self.num_jets = self._get_num_jets(num_jets)
         self.num_csts = self._get_num_csts(num_csts)
-        log.info(f"Loaded {self.num_jets} jets with {self.num_csts} constituentsfrom {file_path}")
+        log.info(f"Loaded {self.num_jets} jets with {self.num_csts} constituents from {file_path}")
 
     def __len__(self) -> int:
         return self.num_jets
