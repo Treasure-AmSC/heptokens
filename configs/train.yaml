@@ -41,6 +41,7 @@ trainer:
   reload_dataloaders_every_n_epochs: 1  # Allows the streaming dataloader to resume mid-epoch
   val_check_interval: 5_000
   limit_val_batches: 500  # Often don't need to run full val for pretraining
+  gradient_clip_val:  # Can set via command line
 # Logger settings
 logger:
   _target_: lightning.pytorch.loggers.wandb.WandbLogger

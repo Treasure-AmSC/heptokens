@@ -1,4 +1,6 @@
+# TODO: at some point you need to integrate this with classifier.py which support fine tuning.
 import logging
+from abc import ABC, abstractmethod
 from typing import Literal
 
 import torch as T
@@ -12,8 +14,297 @@ from gdig.models.transformer import Transformer
 log = logging.getLogger(__name__)
 
 
-class TokenClassifier(LightningModule):
-    """Classifier that operates on VQ-VAE token IDs."""
+class Embedder(ABC, T.nn.Module):
+    """Base class for sequence embedders.
+
+    Embedders convert raw input data into sequence embeddings.
+    They handle both data preprocessing and embedding logic.
+    """
+
+    @abstractmethod
+    def embed(self, batch: dict) -> tuple[T.Tensor, T.BoolTensor]:
+        """Convert batch to embeddings.
+
+        Args:
+            batch: Input batch dictionary (keys depend on embedder type)
+
+        Returns:
+            (embeddings, mask) where:
+            - embeddings: [B, N, d_model] tensor
+            - mask: [B, N] boolean tensor (True = valid)
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def output_dim(self) -> int:
+        """Embedding output dimension."""
+        pass
+
+
+class SequenceEncoder(ABC, T.nn.Module):
+    """Base class for sequence encoding (e.g., attention-based)."""
+
+    @abstractmethod
+    def encode(self, x: T.Tensor, mask: T.BoolTensor) -> T.Tensor:
+        """Encode sequence.
+
+        Args:
+            x: [B, N, input_dim]
+            mask: [B, N] boolean mask
+
+        Returns:
+            [B, N, output_dim]
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def output_dim(self) -> int:
+        """Output dimension of encoder."""
+        pass
+
+
+class Pooler(ABC, T.nn.Module):
+    """Base class for sequence pooling strategies."""
+
+    @abstractmethod
+    def pool(self, x: T.Tensor, mask: T.BoolTensor) -> T.Tensor:
+        """Pool sequence representation.
+
+        Args:
+            x: [B, N, d_model]
+            mask: [B, N] boolean mask
+
+        Returns:
+            [B, d_model]
+        """
+        pass
+
+
+class TransformerEncoder(SequenceEncoder):
+    """Transformer-based sequence encoder."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        d_model: int,
+        n_heads: int = 8,
+        num_layers: int = 4,
+        dim_feedforward: int = 512,
+        dropout: float = 0.0,
+        activation: str = "gelu",
+    ) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.transformer = Transformer(
+            input_dim=input_dim,
+            output_dim=d_model,
+            d_model=d_model,
+            n_heads=n_heads,
+            num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation=activation,
+        )
+
+    @property
+    def output_dim(self) -> int:
+        return self.d_model
+
+    def encode(self, x: T.Tensor, mask: T.BoolTensor) -> T.Tensor:
+        return self.transformer(x, mask=mask)
+
+
+class ClsTokenPooler(Pooler):
+    """Pooling using learnable CLS token."""
+
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.cls_token = T.nn.Parameter(T.zeros(1, 1, d_model))
+
+    def pool(self, x: T.Tensor, mask: T.BoolTensor) -> T.Tensor:
+        # Prepend CLS token
+        cls = self.cls_token.expand(x.shape[0], -1, -1)
+        x = T.cat([cls, x], dim=1)
+        cls_mask = T.ones((mask.shape[0], 1), device=mask.device, dtype=mask.dtype)
+        mask = T.cat([cls_mask, mask], dim=1)
+        # CLS representation is at position 0
+        return x[:, 0, :]
+
+
+class MeanPooler(Pooler):
+    """Mean pooling over valid positions."""
+
+    def pool(self, x: T.Tensor, mask: T.BoolTensor) -> T.Tensor:
+        valid_sum = (x * mask.unsqueeze(-1)).sum(dim=1)
+        valid_count = mask.sum(dim=1, keepdim=True)
+        return valid_sum / valid_count.clamp(min=1)
+
+
+class MaxPooler(Pooler):
+    """Max pooling over valid positions."""
+
+    def pool(self, x: T.Tensor, mask: T.BoolTensor) -> T.Tensor:
+        x_masked = x.masked_fill(~mask.unsqueeze(-1), float("-inf"))
+        return x_masked.max(dim=1)[0]
+
+
+class TokenEmbedder(Embedder):
+    """Embedder for VQ-VAE token IDs."""
+
+    def __init__(
+        self,
+        codebook_size: int,
+        d_model: int,
+        num_quantizers: int = 1,
+        tokenizer_ckpt: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.codebook_size = codebook_size
+        self.d_model = d_model
+        self.num_quantizers = num_quantizers
+        self.tokenizer_ckpt = tokenizer_ckpt
+
+        self.tokenizer = None
+        if tokenizer_ckpt is not None:
+            self.tokenizer = VqvaeTokenizer(tokenizer_ckpt)
+
+        self.token_emb = T.nn.Embedding(codebook_size + 1, d_model, padding_idx=0)
+
+    @property
+    def output_dim(self) -> int:
+        return self.d_model
+
+    def embed(self, batch: dict) -> tuple[T.Tensor, T.BoolTensor]:
+        # Preprocess if tokenizer available
+        if self.tokenizer is not None:
+            batch = self.tokenizer(batch)
+
+        tokens = batch["tokens"]
+        mask = batch["mask"]
+
+        if tokens.dim() == 2:
+            tokens = tokens.unsqueeze(-1)
+
+        # Shift for padding index and mask out invalid positions
+        tokens = tokens + 1
+        tokens = T.where(mask.unsqueeze(-1), tokens, T.zeros_like(tokens))
+
+        # Embed and sum across quantizers
+        emb = self.token_emb(tokens)  # [B, N, Q, D]
+        emb = emb.sum(dim=2)
+
+        return emb, mask
+
+
+class FeatureEmbedder(Embedder):
+    """Embedder for raw constituent features."""
+
+    def __init__(self, input_dim: int, d_model: int) -> None:
+        super().__init__()
+        self.input_dim = input_dim
+        self.d_model = d_model
+        self.projection = T.nn.Linear(input_dim, d_model)
+
+    @property
+    def output_dim(self) -> int:
+        return self.d_model
+
+    def embed(self, batch: dict) -> tuple[T.Tensor, T.BoolTensor]:
+        csts = batch["csts"]
+        mask = batch["mask"]
+
+        # Zero out masked positions
+        csts = T.where(mask.unsqueeze(-1), csts, T.zeros_like(csts))
+        embeddings = self.projection(csts)
+
+        return embeddings, mask
+
+
+class JetClassifier(LightningModule):
+    """General-purpose jet classifier with pluggable components.
+
+    Architecture:
+        Input -> Embedder -> Encoder -> Pooler -> Head -> Logits
+    """
+
+    def __init__(
+        self,
+        *,
+        embedder: Embedder,
+        encoder: SequenceEncoder,
+        pooler: Pooler,
+        n_classes: int,
+        learning_rate: float = 1e-3,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters(ignore=["embedder", "encoder", "pooler"])
+
+        # Validate compatibility
+        if embedder.output_dim != encoder.encode.__code__.co_varnames[1:2][0]:  # Quick check
+            log.warning(
+                f"Embedder output_dim ({embedder.output_dim}) may not match "
+                f"encoder input_dim. Check compatibility."
+            )
+
+        self.embedder = embedder
+        self.encoder = encoder
+        self.pooler = pooler
+        self.n_classes = n_classes
+
+        # Classification head
+        self.classifier = T.nn.Linear(encoder.output_dim, n_classes)
+
+        # Metrics
+        self.train_acc = Accuracy("multiclass", num_classes=n_classes)
+        self.valid_acc = Accuracy("multiclass", num_classes=n_classes)
+
+    def forward(self, batch: dict) -> T.Tensor:
+        """Forward pass through entire pipeline."""
+        # Embed
+        x, mask = self.embedder.embed(batch)
+
+        # Encode
+        x = self.encoder.encode(x, mask)
+
+        # Pool
+        x = self.pooler.pool(x, mask)
+
+        # Classify
+        return self.classifier(x)
+
+    def _shared_step(self, batch: dict, prefix: str) -> T.Tensor:
+        labels = batch["labels"]
+
+        output = self.forward(batch)
+        loss = cross_entropy(output, labels, label_smoothing=0.1)
+        self.log(f"{prefix}/total_loss", loss)
+
+        acc = getattr(self, f"{prefix}_acc")
+        acc(output, labels)
+        self.log(f"{prefix}/acc", acc)
+
+        return loss
+
+    def training_step(self, batch: dict) -> T.Tensor:
+        return self._shared_step(batch, "train")
+
+    def validation_step(self, batch: dict) -> T.Tensor:
+        return self._shared_step(batch, "valid")
+
+    def predict_step(self, batch: dict) -> dict:
+        output = self.forward(batch)
+        labels = batch["labels"]
+        return {"output": output, "label": labels.unsqueeze(-1)}
+
+    def configure_optimizers(self):
+        return T.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+
+
+class TokenClassifier(JetClassifier):
+    """Explicit instantiation of JetClassifier using VQ-VAE token embedder."""
 
     def __init__(
         self,
@@ -33,25 +324,14 @@ class TokenClassifier(LightningModule):
         tokenizer_ckpt: str | None = None,
         **kwargs,
     ) -> None:
-        super().__init__()
-        self.save_hyperparameters()
-
-        self.n_classes = n_classes
-        self.num_quantizers = num_quantizers
-        self.pooling = pooling
-
-        # Add tokenizer if checkpoint provided
-        if tokenizer_ckpt is not None:
-            self.tokenizer = VqvaeTokenizer(tokenizer_ckpt)
-        else:
-            self.tokenizer = None
-
-        # +1 for padding index 0 (tokens are shifted by +1)
-        self.token_emb = T.nn.Embedding(codebook_size + 1, d_model, padding_idx=0)
-
-        self.encoder = Transformer(
+        embedder = TokenEmbedder(
+            codebook_size=codebook_size,
+            d_model=d_model,
+            num_quantizers=num_quantizers,
+            tokenizer_ckpt=tokenizer_ckpt,
+        )
+        encoder = TransformerEncoder(
             input_dim=d_model,
-            output_dim=d_model,
             d_model=d_model,
             n_heads=n_heads,
             num_layers=num_layers,
@@ -59,87 +339,66 @@ class TokenClassifier(LightningModule):
             dropout=dropout,
             activation=activation,
         )
+        pooler_cls = {
+            "cls": ClsTokenPooler,
+            "mean": MeanPooler,
+            "max": MaxPooler,
+        }[pooling]
+        pooler = pooler_cls(d_model) if pooling == "cls" else pooler_cls()
 
-        if pooling == "cls":
-            self.cls_token = T.nn.Parameter(T.zeros(1, 1, d_model))
+        super().__init__(
+            embedder=embedder,
+            encoder=encoder,
+            pooler=pooler,
+            n_classes=n_classes,
+            learning_rate=learning_rate,
+            **kwargs,
+        )
 
-        self.classifier = T.nn.Linear(d_model, n_classes)
 
-        self.train_acc = Accuracy("multiclass", num_classes=n_classes)
-        self.valid_acc = Accuracy("multiclass", num_classes=n_classes)
+class FeatureClassifier(JetClassifier):
+    """Explicit instantiation of JetClassifier using raw feature embedder."""
 
-    def _embed_tokens(self, tokens: T.Tensor, mask: T.BoolTensor) -> T.Tensor:
-        """Embed token ids and combine quantizers if present."""
-        if tokens.dim() == 2:
-            tokens = tokens.unsqueeze(-1)
+    def __init__(
+        self,
+        *,
+        data_sample: tuple | None = None,
+        n_classes: int,
+        d_model: int = 128,
+        n_heads: int = 8,
+        num_layers: int = 4,
+        dim_feedforward: int = 512,
+        dropout: float = 0.0,
+        activation: str = "gelu",
+        pooling: Literal["mean", "max", "cls"] = "mean",
+        learning_rate: float = 1e-3,
+        **kwargs,
+    ) -> None:
+        embedder = FeatureEmbedder(
+            input_dim=data_sample["csts"].shape[-1],
+            d_model=d_model,
+        )
+        encoder = TransformerEncoder(
+            input_dim=d_model,
+            d_model=d_model,
+            n_heads=n_heads,
+            num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation=activation,
+        )
+        pooler_cls = {
+            "cls": ClsTokenPooler,
+            "mean": MeanPooler,
+            "max": MaxPooler,
+        }[pooling]
+        pooler = pooler_cls(d_model) if pooling == "cls" else pooler_cls()
 
-        # Shift so padding is 0; set masked positions to 0
-        tokens = tokens + 1
-        tokens = T.where(mask.unsqueeze(-1), tokens, T.zeros_like(tokens))
-
-        # Embed each quantizer and sum across quantizer dimension
-        emb = self.token_emb(tokens)  # [B, N, Q, D]
-        emb = emb.sum(dim=2)
-
-        return emb
-
-    def forward(self, tokens: T.Tensor, mask: T.BoolTensor) -> T.Tensor:
-        if self.pooling == "cls":
-            x = self._embed_tokens(tokens, mask)
-            cls = self.cls_token.expand(x.shape[0], -1, -1)
-            x = T.cat([cls, x], dim=1)
-            cls_mask = T.ones((mask.shape[0], 1), device=mask.device, dtype=mask.dtype)
-            mask = T.cat([cls_mask, mask], dim=1)
-            x = self.encoder(x, mask=mask)
-            pooled = x[:, 0, :]
-        else:
-            x = self._embed_tokens(tokens, mask)
-            x = self.encoder(x, mask=mask)
-            if self.pooling == "mean":
-                valid_sum = (x * mask.unsqueeze(-1)).sum(dim=1)
-                valid_count = mask.sum(dim=1, keepdim=True)
-                pooled = valid_sum / valid_count.clamp(min=1)
-            elif self.pooling == "max":
-                x_masked = x.masked_fill(~mask.unsqueeze(-1), float("-inf"))
-                pooled = x_masked.max(dim=1)[0]
-            else:
-                raise ValueError(f"Unknown pooling method: {self.pooling}")
-
-        return self.classifier(pooled)
-
-    def process_data(self, batch: dict) -> dict:
-        """Tokenize input data if tokenizer is available."""
-        if self.tokenizer is not None:
-            batch = self.tokenizer(batch)
-        return batch
-
-    def _shared_step(self, data: dict, prefix: str) -> T.Tensor:
-        data = self.process_data(data)
-        tokens = data["tokens"]
-        labels = data["labels"]
-        mask = data["mask"]
-        output = self.forward(tokens, mask)
-        loss = cross_entropy(output, labels, label_smoothing=0.1)
-        self.log(f"{prefix}/total_loss", loss)
-
-        acc = getattr(self, f"{prefix}_acc")
-        acc(output, labels)
-        self.log(f"{prefix}/acc", acc)
-        return loss
-
-    def training_step(self, data: dict) -> T.Tensor:
-        return self._shared_step(data, "train")
-
-    def validation_step(self, data: dict) -> T.Tensor:
-        return self._shared_step(data, "valid")
-
-    def predict_step(self, data: dict) -> dict:
-        data = self.process_data(data)
-        tokens = data["tokens"]
-        labels = data["labels"]
-        mask = data["mask"]
-        output = self.forward(tokens, mask)
-        return {"output": output, "label": labels.unsqueeze(-1)}
-
-    def configure_optimizers(self):
-        return T.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+        super().__init__(
+            embedder=embedder,
+            encoder=encoder,
+            pooler=pooler,
+            n_classes=n_classes,
+            learning_rate=learning_rate,
+            **kwargs,
+        )

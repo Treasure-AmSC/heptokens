@@ -3,7 +3,6 @@ from collections.abc import Iterable
 import numpy as np
 import torch as T
 from sklearn.base import BaseEstimator
-from torch import nn
 from torch.utils.data import default_collate
 
 from gdig.models.vq_vae import LitVqVae
@@ -26,19 +25,6 @@ def collate_and_transform(
         for transform in transforms:
             batch = transform(batch)
     return batch
-
-
-def tokenize_batch(
-    jet_dict: dict[T.Tensor],
-    token_fn: nn.Module,
-) -> dict:
-    """Add token versions of the constituents to the jet_dict."""
-    csts = jet_dict["csts"]
-    mask = jet_dict["mask"]
-    out = token_fn.predict(csts[mask].T.contiguous()).long()
-    jet_dict["tokens"] = T.zeros(mask.shape, dtype=T.long)
-    jet_dict["tokens"][mask] = out
-    return jet_dict
 
 
 class VqvaeTokenizer:

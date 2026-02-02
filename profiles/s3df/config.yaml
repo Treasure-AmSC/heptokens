@@ -1,0 +1,16 @@
+---
+executor: slurm
+jobs: 100
+printshellcmds: true
+use-singularity: false
+restart-times: 0
+rerun-incomplete: true
+rerun-triggers: mtime
+default-resources:
+  - slurm_account=mli:bax@turing
+  - slurm_partition=turing
+  - runtime=540
+  - mem_mb=16000
+  - nodes=1
+  - cpus=4
+  - gpus=1

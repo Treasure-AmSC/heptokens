@@ -1,0 +1,6 @@
+---
+executor: local
+jobs: 1
+printshellcmds: true
+use-singularity: false
+rerun-incomplete: true
