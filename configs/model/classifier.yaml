@@ -1,5 +1,4 @@
 ---
-# TODO: set the actual model set up!
 optimizer:
   _target_: gdig.models.optimisers.AdamWS
   _partial_: true

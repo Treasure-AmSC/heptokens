@@ -11,3 +11,4 @@ activation: gelu
 pooling: mean
 learning_rate: 1.0e-3
 tokenizer_ckpt: /sdf/group/mli/samklein/code/gold_diggers/results/test_project/test/checkpoints/last.ckpt
+aggregate_tokens: flatten

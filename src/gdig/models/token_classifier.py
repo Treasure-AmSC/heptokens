@@ -151,7 +151,7 @@ class MaxPooler(Pooler):
 
 
 class TokenEmbedder(Embedder):
-    """Embedder for VQ-VAE token IDs."""
+    """Embedder for VQ-VAE token IDs with configurable aggregation."""
 
     def __init__(
         self,
@@ -159,22 +159,49 @@ class TokenEmbedder(Embedder):
         d_model: int,
         num_quantizers: int = 1,
         tokenizer_ckpt: str | None = None,
+        aggregate: Literal["sum", "flatten", "learned_weights", "attention"] = "sum",
+        num_heads: int = 2,
     ) -> None:
         super().__init__()
         self.codebook_size = codebook_size
         self.d_model = d_model
         self.num_quantizers = num_quantizers
         self.tokenizer_ckpt = tokenizer_ckpt
+        self.aggregate = aggregate
 
         self.tokenizer = None
         if tokenizer_ckpt is not None:
             self.tokenizer = VqvaeTokenizer(tokenizer_ckpt)
 
-        self.token_emb = T.nn.Embedding(codebook_size + 1, d_model, padding_idx=0)
+        # Compute embedding dimension per quantizer
+        if aggregate == "flatten":
+            import math
+
+            emb_dim_per_q = math.ceil(d_model / num_quantizers)
+            self.token_emb = T.nn.Embedding(codebook_size + 1, emb_dim_per_q, padding_idx=0)
+            self._output_dim = d_model
+        else:
+            self.token_emb = T.nn.Embedding(codebook_size + 1, d_model, padding_idx=0)
+            self._output_dim = d_model
+
+        # Aggregation-specific layers
+        if aggregate == "learned_weights":
+            # Learnable weights for each quantizer: [num_quantizers]
+            self.quantizer_weights = T.nn.Parameter(T.ones(num_quantizers) / num_quantizers)
+        elif aggregate == "attention":
+            # Multi-head attention to combine quantizers
+            self.quantizer_attention = T.nn.MultiheadAttention(
+                embed_dim=d_model,
+                num_heads=num_heads,
+                batch_first=True,
+                dropout=0.0,
+            )
+            # Learnable importance weights for each quantizer
+            self.quantizer_weights = T.nn.Parameter(T.ones(num_quantizers) / num_quantizers)
 
     @property
     def output_dim(self) -> int:
-        return self.d_model
+        return self._output_dim
 
     def embed(self, batch: dict) -> tuple[T.Tensor, T.BoolTensor]:
         # Preprocess if tokenizer available
@@ -191,9 +218,50 @@ class TokenEmbedder(Embedder):
         tokens = tokens + 1
         tokens = T.where(mask.unsqueeze(-1), tokens, T.zeros_like(tokens))
 
-        # Embed and sum across quantizers
-        emb = self.token_emb(tokens)  # [B, N, Q, D]
-        emb = emb.sum(dim=2)
+        # Embed each quantizer: [B, N, Q, D]
+        emb = self.token_emb(tokens)
+
+        if self.aggregate == "flatten":
+            # Flatten quantizers: [B, N, Q, D_per_Q] -> [B, N, Q*D_per_Q]
+            emb = emb.reshape(emb.shape[0], emb.shape[1], -1)
+            # Slice to actual output dimension
+            emb = emb[:, :, : self._output_dim]
+
+        elif self.aggregate == "learned_weights":
+            # Apply learned weights: [B, N, Q, D] * [Q] -> [B, N, D]
+            weights = self.quantizer_weights.view(1, 1, -1, 1)
+            emb = (emb * weights).sum(dim=2)
+
+        elif self.aggregate == "attention":
+            batch_size, seq_len, num_q, d_model = emb.shape
+            emb_reshaped = emb.reshape(batch_size * seq_len, num_q, d_model)
+
+            # Apply learned per-quantizer scaling
+            weights = T.softmax(self.quantizer_weights, dim=0)  # [Q]
+            emb_reshaped = emb_reshaped * weights.view(1, num_q, 1)  # Scale each quantizer
+
+            # Expand mask to quantizer dimension: [B, N] -> [B, N, Q] -> [B*N, Q]
+            mask_expanded = mask.unsqueeze(-1).expand(-1, -1, num_q)  # [B, N, Q]
+            mask_reshaped = mask_expanded.reshape(batch_size * seq_len, num_q)  # [B*N, Q]
+            emb_reshaped = emb_reshaped * mask_reshaped.unsqueeze(-1).float()
+
+            # Apply attention
+            attn_out, _ = self.quantizer_attention(
+                emb_reshaped,
+                emb_reshaped,
+                emb_reshaped,
+                need_weights=False,
+            )
+
+            # Mean pool over quantizers (only valid ones)
+            valid_count = mask_reshaped.float().sum(dim=1, keepdim=True).clamp(min=1)  # [B*N, 1]
+            emb = (attn_out * mask_reshaped.float().unsqueeze(-1)).sum(dim=1) / valid_count
+
+            emb = emb.reshape(batch_size, seq_len, d_model)
+
+        else:  # sum (default)
+            # Sum over quantizers: [B, N, Q, D] -> [B, N, D]
+            emb = emb.sum(dim=2)
 
         return emb, mask
 
@@ -322,6 +390,8 @@ class TokenClassifier(JetClassifier):
         pooling: Literal["mean", "max", "cls"] = "mean",
         learning_rate: float = 1e-3,
         tokenizer_ckpt: str | None = None,
+        aggregate_tokens: Literal["sum", "flatten", "learned_weights", "attention"] = "flatten",
+        quantizer_attention_heads: int = 4,
         **kwargs,
     ) -> None:
         embedder = TokenEmbedder(
@@ -329,6 +399,8 @@ class TokenClassifier(JetClassifier):
             d_model=d_model,
             num_quantizers=num_quantizers,
             tokenizer_ckpt=tokenizer_ckpt,
+            aggregate=aggregate_tokens,
+            num_heads=quantizer_attention_heads,
         )
         encoder = TransformerEncoder(
             input_dim=d_model,

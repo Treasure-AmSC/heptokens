@@ -15,8 +15,6 @@ This will launch a shell and install all necessary dependencies.
 Inside of this environment the code under `src/gdig` will behave like a library.
 So we can do imports like `from gdig.model import kmeans` for example.
 
-TODO: check that torch CUDA actually gets installed on s3df!
-
 ## Resources
 
 * [Pixi documentation](https://pixi.sh/)
