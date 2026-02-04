@@ -3,10 +3,10 @@ from pathlib import Path
 
 # Parameters
 n_jets = [10_000_000]
-# tokenizers = ["kmeans"]  # TODO: unclear how to integrate this one
+# tokenizers = ["kmeans"]  # TODO: unclear how to integrate this one, useful as a baseline!
 tokenizers = ["vqvae", "transformer_vqvae", "set2vec_vqvae", "diffusion_vqvae"]
-output_dir = Path("/sdf/group/mli/samklein/code/gold_diggers/results/full_run")
-# TODO: set trainer.max_epochs=10 properly
+output_dir = Path("/sdf/group/mli/samklein/code/gold_diggers/results/long_run")
+# TODO: set trainer.max_epochs=30 properly
 
 rule all:
     input:
@@ -34,7 +34,7 @@ rule train_tokenizer:
             network_name=n_jets_{wildcards.num_jets} \
             datamodule.num_jets={wildcards.num_jets} \
             model={wildcards.tokenizer} \
-            trainer.max_epochs=10 \
+            trainer.max_epochs=30 \
             +trainer.num_sanity_val_steps=0 \
             {params.clip_grad} \
             {params.callbacks}
@@ -59,7 +59,7 @@ rule train_token_classifier:
             datamodule.num_jets={wildcards.num_jets} \
             model=token_classifier \
             model.tokenizer_ckpt={input.tokenizer_ckpt} \
-            trainer.max_epochs=10 \
+            trainer.max_epochs=30 \
             +trainer.num_sanity_val_steps=0
         """
 
@@ -77,5 +77,6 @@ rule train_feature_classifier:
             datamodule=atlas_mappable \
             datamodule.num_jets={wildcards.num_jets} \
             model=feature_classifier \
-            trainer.max_epochs=10 \
+            trainer.max_epochs=30 \
+            callbacks=classify \
         """

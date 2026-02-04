@@ -6,7 +6,7 @@ from typing import Literal
 import torch as T
 from lightning import LightningModule
 from torch.nn.functional import cross_entropy
-from torchmetrics import Accuracy
+from torchmetrics import AUROC, Accuracy
 
 from gdig.data.preprocessing import VqvaeTokenizer
 from gdig.models.transformer import Transformer
@@ -329,6 +329,13 @@ class JetClassifier(LightningModule):
         self.train_acc = Accuracy("multiclass", num_classes=n_classes)
         self.valid_acc = Accuracy("multiclass", num_classes=n_classes)
 
+        # AUC metrics (one-vs-rest for multiclass)
+        self.train_auc = AUROC(task="multiclass", num_classes=n_classes, average="macro")
+        self.valid_auc = AUROC(task="multiclass", num_classes=n_classes, average="macro")
+
+        # Store outputs for ROC plotting
+        self.validation_outputs = []
+
     def forward(self, batch: dict) -> T.Tensor:
         """Forward pass through entire pipeline."""
         # Embed
@@ -353,6 +360,12 @@ class JetClassifier(LightningModule):
         acc = getattr(self, f"{prefix}_acc")
         acc(output, labels)
         self.log(f"{prefix}/acc", acc)
+
+        # Track AUC
+        auc = getattr(self, f"{prefix}_auc")
+        probs = T.softmax(output, dim=1)
+        auc(probs, labels)
+        self.log(f"{prefix}/auc", auc)
 
         return loss
 
