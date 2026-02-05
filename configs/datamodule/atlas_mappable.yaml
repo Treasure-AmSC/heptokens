@@ -21,14 +21,15 @@ batch_size: 1024
 pin_memory: true
 # Optional transforms (instantiated separately)  TODO: improve this
 transforms:
-  - _target_: gdig.data.preprocessing.preprocess_batch
+  preprocess:
+    _target_: gdig.data.collation.preprocess_batch
     _partial_: true
     cst_fn:
       _target_: joblib.load
-      filename: /sdf/scratch/users/s/samklein/data/atlas/resources/cst_quantiles.joblib
+      filename: /path/to/cst_quantiles.joblib
     jet_fn:
       _target_: joblib.load
-      filename: /sdf/scratch/users/s/samklein/data/atlas/resources/jet_quantiles.joblib
+      filename: /path/to/jet_quantiles.joblib
 # Dataset-specific config (passed to MapDataset via **data_config)
 label_key: HadronConeExclTruthLabelID
 jet_features: [pt, mass]

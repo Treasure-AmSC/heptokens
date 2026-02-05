@@ -6,7 +6,7 @@ import torch as T
 from lightning.pytorch.callbacks import Callback
 from sklearn.base import BaseEstimator
 
-from gdig.data.preprocessing import inverse_preprocess_batch
+from gdig.data.collation import inverse_preprocess_batch
 from gdig.utils.torch_utils import dict_to_device
 
 log = logging.getLogger(__name__)

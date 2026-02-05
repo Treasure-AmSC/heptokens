@@ -10,7 +10,7 @@ import torch
 from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, random_split
 
-from gdig.data.preprocessing import collate_and_transform
+from gdig.data.collation import collate_and_transform
 from gdig.utils.plot_physics import JET_FEATURES, TRACK_FEATURES, load_jets_table
 
 log = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ class BaseMapModule(LightningDataModule, ABC):
         num_workers: int = 6,
         batch_size: int = 1000,
         pin_memory: bool = True,
-        transforms: list | None = None,
+        transforms: dict | None = None,
         **data_config,
     ) -> None:
         super().__init__()

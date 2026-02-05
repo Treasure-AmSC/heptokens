@@ -2,6 +2,7 @@ from collections.abc import Iterable
 
 import numpy as np
 import torch as T
+from omegaconf import DictConfig
 from sklearn.base import BaseEstimator
 from torch.utils.data import default_collate
 
@@ -11,18 +12,20 @@ from gdig.models.vq_vae import LitVqVae
 def collate_and_transform(
     batch: Iterable[dict],
     do_default_collate: bool = True,
-    transforms: list[callable] | None = None,
+    transforms: dict | DictConfig | list | None = None,
 ) -> dict:
-    """Collate the batch and apply the transforms.
-
-    Why this not lightning's on_before_batch_transfer?
-    This still runs inside the pytorch multiprocessing pool for data loading.
-    Thus it runs asynchonously for each batch being prepared.
-    """
     if do_default_collate:
         batch = default_collate(batch)
     if transforms is not None:
-        for transform in transforms:
+        # Handle OmegaConf DictConfig, dict, and list of transforms
+        if isinstance(transforms, (dict, DictConfig)):
+            # Extract callable transforms from dict/DictConfig, filtering out non-callable values
+            transform_list = [v for v in transforms.values() if callable(v)]
+        else:
+            # Assume it's already a list of transforms
+            transform_list = transforms if isinstance(transforms, list) else [transforms]
+
+        for transform in transform_list:
             batch = transform(batch)
     return batch
 
@@ -65,17 +68,25 @@ def preprocess_batch(
     mask = jet_dict["mask"]
     jets = jet_dict["jets"]
 
-    # Pad the csts with zeros to match what the cst_fn expects
-    if (feat_diff := cst_fn.n_features_in_ - csts.shape[-1]) > 0:
-        zeros = np.zeros((csts.shape[:-1] + (feat_diff,)), dtype=csts.dtype)
-        csts = np.concatenate((csts, zeros), axis=-1)
-    csts[mask] = T.from_numpy(cst_fn.transform(csts[mask])).float()
-    if feat_diff > 0:
-        csts = csts[:, :-feat_diff]  # Remove the padding
-    jet_dict["csts"] = csts
+    # Convert to numpy for sklearn
+    csts_np = csts.cpu().numpy() if isinstance(csts, T.Tensor) else csts
+    jets_np = jets.cpu().numpy() if isinstance(jets, T.Tensor) else jets
 
-    jets = T.from_numpy(jet_fn.transform(jets)).float()
-    jet_dict["jets"] = jets
+    # Pad and transform
+    if (feat_diff := cst_fn.n_features_in_ - csts_np.shape[-1]) > 0:
+        zeros = np.zeros((csts_np.shape[:-1] + (feat_diff,)), dtype=csts_np.dtype)
+        csts_np = np.concatenate((csts_np, zeros), axis=-1)
+
+    csts_np[mask.cpu().numpy() if isinstance(mask, T.Tensor) else mask] = cst_fn.transform(
+        csts_np[mask.cpu().numpy() if isinstance(mask, T.Tensor) else mask]
+    )
+
+    if feat_diff > 0:
+        csts_np = csts_np[:, :-feat_diff]
+
+    # Convert back to tensor
+    jet_dict["csts"] = T.from_numpy(csts_np).float()
+    jet_dict["jets"] = T.from_numpy(jet_fn.transform(jets_np)).float()
 
     return jet_dict
 

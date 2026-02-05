@@ -8,7 +8,7 @@ from lightning import LightningModule
 from torch.nn.functional import cross_entropy
 from torchmetrics import AUROC, Accuracy
 
-from gdig.data.preprocessing import VqvaeTokenizer
+from gdig.data.collation import VqvaeTokenizer
 from gdig.models.transformer import Transformer
 
 log = logging.getLogger(__name__)

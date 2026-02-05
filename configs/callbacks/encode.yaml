@@ -26,8 +26,8 @@ reconstruction_monitor:
   _target_: gdig.callbacks.recon.ReconstructionMonitor
   cst_fn:
     _target_: joblib.load
-    filename: ${datamodule.transforms.0.cst_fn.filename}
+    filename: ${datamodule.transforms.preprocess.cst_fn.filename}
   jet_fn:
     _target_: joblib.load
-    filename: ${datamodule.transforms.0.jet_fn.filename}
+    filename: ${datamodule.transforms.preprocess.jet_fn.filename}
   log_every_n_epochs: 1
