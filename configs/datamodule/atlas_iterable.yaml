@@ -1,0 +1,45 @@
+---
+_target_: gdig.data.atlas_iterable.SingleFileIterModule
+
+# Data path
+data_path: /sdf/scratch/users/s/samklein/data/atlas/mc-flavtag-ttbar-small.h5
+
+# Split ratios (must sum to 1.0)
+train_frac: 0.7
+val_frac: 0.15
+test_frac: 0.15
+
+# Random seed for reproducible splits
+seed: 42
+
+# Chunk size for memory-efficient loading
+chunk_size: 1000
+
+# Number of classes
+n_classes: 4
+
+# DataLoader settings
+num_workers: 3
+batch_size: 1024
+pin_memory: true
+# Optional transforms (instantiated separately)  TODO: improve this
+transforms:
+  preprocess:
+    _target_: gdig.data.collation.preprocess_batch
+    _partial_: true
+    cst_fn:
+      _target_: joblib.load
+      filename: /path/to/cst_quantiles.joblib
+    jet_fn:
+      _target_: joblib.load
+      filename: /path/to/jet_quantiles.joblib
+# Dataset-specific config (passed to IndexedIterMapDataset via **data_config)
+label_key: HadronConeExclTruthLabelID
+jet_features: [pt, mass]
+cst_features:
+  - pt
+  - deta
+  - dphi
+  - d0
+# Optional limits
+num_csts: 40  # Use all constituents per jet
