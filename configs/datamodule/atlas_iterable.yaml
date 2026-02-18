@@ -35,7 +35,7 @@ transforms:
       filename: /path/to/jet_quantiles.joblib
 # Dataset-specific config (passed to IndexedIterMapDataset via **data_config)
 label_key: HadronConeExclTruthLabelID
-jet_features: [pt, mass]
+jet_features: [pt, mass, eta, phi]
 cst_features:
   - pt
   - deta

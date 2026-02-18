@@ -30,6 +30,10 @@ class ReconstructionMonitor(Callback):
         pt_idx: int = 0,
         deta_idx: int = 1,
         dphi_idx: int = 2,
+        jet_pt_idx: int = 0,
+        jet_mass_idx: int = 1,
+        jet_eta_idx: int = 2,
+        jet_phi_idx: int = 3,
         compute_jet_metrics: bool = True,
     ):
         super().__init__()
@@ -40,14 +44,23 @@ class ReconstructionMonitor(Callback):
         self.pt_idx = pt_idx
         self.deta_idx = deta_idx
         self.dphi_idx = dphi_idx
+        self.jet_pt_idx = jet_pt_idx
+        self.jet_mass_idx = jet_mass_idx
+        self.jet_eta_idx = jet_eta_idx
+        self.jet_phi_idx = jet_phi_idx
         self.compute_jet_metrics = compute_jet_metrics
 
         if compute_jet_metrics:
             # Store jet metrics across batches for epoch-level summary
             self.jet_residuals = []
 
+    @staticmethod
+    def wrap_phi(phi):
+        """Wrap angle(s) to [-pi, pi)."""
+        return (phi + np.pi) % (2 * np.pi) - np.pi
+
     # Add helper method to compute jets from constituents
-    def _compute_jet_from_constituents(self, csts, mask):
+    def _compute_jet_from_constituents(self, csts, mask, jets):
         """Compute jet pt from constituent pts (relative coordinates).
 
         Since constituents are in relative (deta, dphi) coordinates,
@@ -61,14 +74,46 @@ class ReconstructionMonitor(Callback):
         Returns:
             dict with jet pt (sum of constituent pts)
         """
-        # Extract constituent pt
-        pt = csts[:, :, self.pt_idx].cpu().numpy()
+        # Extract jet eta, phi
+        jet_etas = jets[:, self.jet_eta_idx].cpu().numpy()
+        jet_phis = jets[:, self.jet_phi_idx].cpu().numpy()
+
+        #assume csts masses are zero, so we can compute jet mass from constituent pts and jet pt
+        csts_pts = csts[:, :, self.pt_idx].cpu().numpy()
+        csts_detas = csts[:, :, self.deta_idx].cpu().numpy()
+        csts_dphis = csts[:, :, self.dphi_idx].cpu().numpy()
+
+        #add back jet coords to get absolute csts coords
+        csts_phis_unbounded = csts_dphis + jet_phis[:, None]
+        csts_phis = self._delta_phi(csts_phis_unbounded, 0.)
+        csts_etas = csts_detas + jet_etas[:, None]
+
+        pxs = csts_pts*np.cos(csts_phis)
+        pys = csts_pts*np.sin(csts_phis)
+        pzs = csts_pts*np.sinh(csts_etas)
+        energies = csts_pts*np.cosh(csts_etas)
+
         mask_np = mask.cpu().numpy()
 
-        # Sum pt for valid constituents only
-        jet_pt = np.sum(np.where(mask_np, pt, 0), axis=1)
+        # Sum for valid constituents only
+        reco_jet_pxs = np.sum(np.where(mask_np, pxs, 0), axis=-1)
+        reco_jet_pys = np.sum(np.where(mask_np, pys, 0), axis=-1)
+        reco_jet_pzs = np.sum(np.where(mask_np, pzs, 0), axis=-1)
+        reco_jet_pts = np.sqrt(reco_jet_pxs**2 + reco_jet_pys**2)
+        reco_jet_pts = np.where(reco_jet_pts == 0, 1e-10, reco_jet_pts)
+        reco_jet_etas = np.arcsinh(reco_jet_pzs / reco_jet_pts)
+        reco_jet_phis = np.arctan2(reco_jet_pys, reco_jet_pxs)
 
-        return {"pt": jet_pt}
+        reco_jet_energies = np.sum(np.where(mask_np, energies, 0), axis=-1)
+        reco_jet_m2s = reco_jet_energies**2 - (reco_jet_pxs**2 + reco_jet_pys**2 + reco_jet_pzs**2)
+        reco_jet_masses = np.sqrt(np.clip(reco_jet_m2s, 0.0, None))
+
+        return {
+            "pt": reco_jet_pts, 
+            "mass": reco_jet_masses, 
+            "eta": reco_jet_etas, 
+            "phi": reco_jet_phis
+        }
 
     def _delta_phi(self, phi1, phi2):
         """Compute delta phi wrapped to [-pi, pi]."""
@@ -117,13 +162,28 @@ class ReconstructionMonitor(Callback):
 
         # Jet-level metrics (pt-based only, since coordinates are relative)
         if self.compute_jet_metrics:
-            # TODO: Jeff please check if this makes sense (probably doesn't)
             # Compute jets from original and reconstructed constituents
-            jet_truth = self._compute_jet_from_constituents(original_unscaled["csts"], mask)
-            jet_reco = self._compute_jet_from_constituents(recon_unscaled["csts"], mask)
+
+            # ToDo: decide whether to get the truth jets from the jet array, or to compute them from unscaled constituents. 
+            # the latter might assume less about the reconstruction?
+            '''
+            jet_truth = {
+                "pt": original_unscaled["jets"][:, self.jet_pt_idx].cpu().numpy(),
+                "mass": original_unscaled["jets"][:, self.jet_mass_idx].cpu().numpy(),
+                "eta": original_unscaled["jets"][:, self.jet_eta_idx].cpu().numpy(),
+                "phi": self._delta_phi(
+                    original_unscaled["jets"][:, self.jet_phi_idx].cpu().numpy(), 0.0
+                ),
+            }
+            '''
+            jet_truth = self._compute_jet_from_constituents(original_unscaled["csts"], mask, original_unscaled["jets"])
+            jet_reco = self._compute_jet_from_constituents(recon_unscaled["csts"], mask, original_unscaled["jets"])
 
             # Compute pt residuals and radial distance
             pt_residuals = jet_truth["pt"] - jet_reco["pt"]
+            mass_residuals = jet_truth["mass"] - jet_reco["mass"]
+            eta_residuals = jet_truth["eta"] - jet_reco["eta"]
+            phi_residuals = self._delta_phi(jet_truth["phi"], jet_reco["phi"])
 
             # Compute mean radial distance in (deta, dphi) space
             mask_np = mask.cpu().numpy()
@@ -140,6 +200,9 @@ class ReconstructionMonitor(Callback):
 
             residuals = {
                 "pt": pt_residuals,
+                "mass": mass_residuals,
+                "eta": eta_residuals,
+                "phi": phi_residuals,
                 "radial_dist": radial_distance,
             }
 
@@ -202,12 +265,24 @@ class ReconstructionMonitor(Callback):
             plt.style.use(hep.style.CMS)
 
             # Create residual plots
-            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-            axes = axes.flatten()
+            plot_order = ["pt", "mass", "eta", "phi", "radial_dist"]
+            labels = {
+                "pt": "Jet pt residual (truth - reco)",
+                "mass": "Jet mass residual (truth - reco)",
+                "eta": "Jet eta residual (truth - reco)",
+                "phi": "Jet phi residual (truth - reco)",
+                "radial_dist": "Constituent radial distance",
+            }
+            vars_to_plot = [key for key in plot_order if key in all_residuals]
+            n_vars = len(vars_to_plot)
+            n_cols = min(3, n_vars)
+            n_rows = int(np.ceil(n_vars / n_cols))
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(7 * n_cols, 4.5 * n_rows))
+            axes = np.atleast_1d(axes).flatten()
 
-            labels = ["Jet pt residual (truth - reco)", "Constituent radial distance"]
-            for i, (var, label) in enumerate(zip(all_residuals.keys(), labels)):
+            for i, var in enumerate(vars_to_plot):
                 ax = axes[i]
+                label = labels.get(var, var)
                 residuals = all_residuals[var]
 
                 # Plot histogram
@@ -225,13 +300,17 @@ class ReconstructionMonitor(Callback):
                         weight="bold",
                     )
                 else:
+                    # Plot central quantile range to suppress extreme tails for now.
+                    # Todo: understand why extreme tails are happening. we saw residuals -4e5 MeV. problem with the inverse transform?
+                    q_low, q_high = np.percentile(residuals, [1, 99])
+                    residuals_plot = residuals[(residuals >= q_low) & (residuals <= q_high)]
                     # Plot histogram
-                    ax.hist(residuals, bins=50, histtype="step", linewidth=2)
+                    ax.hist(residuals_plot, bins=50, histtype="step", linewidth=2)
 
                     # Add statistics text
-                    mean_val = np.mean(residuals)
-                    std_val = np.std(residuals)
-                    median_val = np.median(residuals)
+                    mean_val = np.mean(residuals_plot)
+                    std_val = np.std(residuals_plot)
+                    median_val = np.median(residuals_plot)
                     ax.text(
                         0.05,
                         0.95,
@@ -243,6 +322,10 @@ class ReconstructionMonitor(Callback):
                 ax.set_xlabel(label, fontsize=12)
                 ax.set_ylabel("Count", fontsize=12)
                 ax.grid(True, alpha=0.3)
+
+            # Hide unused axes
+            for i in range(n_vars, len(axes)):
+                axes[i].axis("off")
 
             fig.tight_layout()
             trainer.logger.experiment.log(

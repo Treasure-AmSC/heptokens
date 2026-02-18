@@ -81,7 +81,7 @@ def get_args():
     parser.add_argument(
         "--jet_features",
         type=str,
-        default="pt,mass",
+        default="pt,mass,eta,phi",
         help="Comma-separated list of jet-level features to use.",
     )
 
