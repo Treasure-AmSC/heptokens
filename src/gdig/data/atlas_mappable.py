@@ -97,6 +97,8 @@ class BaseMapModule(LightningDataModule, ABC):
         num_workers: int = 6,
         batch_size: int = 1000,
         pin_memory: bool = True,
+        persistent_workers: bool | None = None,
+        multiprocessing_context: str | None = None,
         transforms: dict | None = None,
         **data_config,
     ) -> None:
@@ -105,6 +107,8 @@ class BaseMapModule(LightningDataModule, ABC):
         self.num_workers = num_workers
         self.batch_size = batch_size
         self.pin_memory = pin_memory
+        self.persistent_workers = num_workers > 0 if persistent_workers is None else persistent_workers
+        self.multiprocessing_context = multiprocessing_context
         self.transforms = transforms
         self.data_config = data_config
 
@@ -124,6 +128,12 @@ class BaseMapModule(LightningDataModule, ABC):
         if self.transforms is not None:
             collate_fn = partial(collate_and_transform, transforms=self.transforms)
 
+        dataloader_kwargs = {}
+        if self.num_workers > 0:
+            dataloader_kwargs["persistent_workers"] = self.persistent_workers
+            if self.multiprocessing_context is not None:
+                dataloader_kwargs["multiprocessing_context"] = self.multiprocessing_context
+
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
@@ -132,6 +142,7 @@ class BaseMapModule(LightningDataModule, ABC):
             shuffle=shuffle,
             drop_last=drop_last,
             collate_fn=collate_fn,
+            **dataloader_kwargs,
         )
 
     def train_dataloader(self) -> DataLoader:

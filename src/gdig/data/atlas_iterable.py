@@ -169,6 +169,12 @@ class PresplitIterModule(BaseMapModule):
         if self.transforms is not None:
             collate_fn = partial(collate_and_transform, transforms=self.transforms)
 
+        dataloader_kwargs = {}
+        if self.num_workers > 0:
+            dataloader_kwargs["persistent_workers"] = self.persistent_workers
+            if self.multiprocessing_context is not None:
+                dataloader_kwargs["multiprocessing_context"] = self.multiprocessing_context
+
         # Note: shuffle parameter is ignored for IterableDataset
         # Shuffling would need to be implemented within the dataset's __iter__ method
         return DataLoader(
@@ -177,6 +183,7 @@ class PresplitIterModule(BaseMapModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=collate_fn,
+            **dataloader_kwargs,
         )
 
 
@@ -252,12 +259,19 @@ class SingleFileIterModule(BaseMapModule):
         if self.transforms is not None:
             collate_fn = partial(collate_and_transform, transforms=self.transforms)
 
+        dataloader_kwargs = {}
+        if self.num_workers > 0:
+            dataloader_kwargs["persistent_workers"] = self.persistent_workers
+            if self.multiprocessing_context is not None:
+                dataloader_kwargs["multiprocessing_context"] = self.multiprocessing_context
+
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=collate_fn,
+            **dataloader_kwargs,
         )
 
 
