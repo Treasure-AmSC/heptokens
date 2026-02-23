@@ -7,7 +7,7 @@ import torch
 from lightning import LightningModule
 from vector_quantize_pytorch import ResidualVQ
 
-from gdig.models.coders import Decoder, Encoder
+from qhep.models.coders import Decoder, Encoder
 
 log = logging.getLogger(__name__)
 

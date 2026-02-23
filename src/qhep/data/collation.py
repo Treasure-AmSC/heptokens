@@ -6,7 +6,7 @@ from omegaconf import DictConfig
 from sklearn.base import BaseEstimator
 from torch.utils.data import default_collate
 
-from gdig.models.vq_vae import LitVqVae
+from qhep.models.vq_vae import LitVqVae
 
 
 def collate_and_transform(

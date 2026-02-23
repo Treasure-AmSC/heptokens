@@ -6,8 +6,8 @@ import torch as T
 from lightning.pytorch.callbacks import Callback
 from sklearn.base import BaseEstimator
 
-from gdig.data.collation import inverse_preprocess_batch
-from gdig.utils.torch_utils import dict_to_device
+from qhep.data.collation import inverse_preprocess_batch
+from qhep.utils.torch_utils import dict_to_device
 
 log = logging.getLogger(__name__)
 
@@ -86,20 +86,20 @@ class ReconstructionMonitor(Callback):
         jet_etas = jets[:, self.jet_eta_idx].cpu().numpy()
         jet_phis = jets[:, self.jet_phi_idx].cpu().numpy()
 
-        #assume csts masses are zero, so we can compute jet mass from constituent pts and jet pt
+        # assume csts masses are zero, so we can compute jet mass from constituent pts and jet pt
         csts_pts = csts[:, :, self.pt_idx].cpu().numpy()
         csts_detas = csts[:, :, self.deta_idx].cpu().numpy()
         csts_dphis = csts[:, :, self.dphi_idx].cpu().numpy()
 
-        #add back jet coords to get absolute csts coords
+        # add back jet coords to get absolute csts coords
         csts_phis_unbounded = csts_dphis + jet_phis[:, None]
-        csts_phis = self._delta_phi(csts_phis_unbounded, 0.)
+        csts_phis = self._delta_phi(csts_phis_unbounded, 0.0)
         csts_etas = csts_detas + jet_etas[:, None]
 
-        pxs = csts_pts*np.cos(csts_phis)
-        pys = csts_pts*np.sin(csts_phis)
-        pzs = csts_pts*np.sinh(csts_etas)
-        energies = csts_pts*np.cosh(csts_etas)
+        pxs = csts_pts * np.cos(csts_phis)
+        pys = csts_pts * np.sin(csts_phis)
+        pzs = csts_pts * np.sinh(csts_etas)
+        energies = csts_pts * np.cosh(csts_etas)
 
         mask_np = mask.cpu().numpy()
 
@@ -117,10 +117,10 @@ class ReconstructionMonitor(Callback):
         reco_jet_masses = np.sqrt(np.clip(reco_jet_m2s, 0.0, None))
 
         return {
-            "pt": reco_jet_pts, 
-            "mass": reco_jet_masses, 
-            "eta": reco_jet_etas, 
-            "phi": reco_jet_phis
+            "pt": reco_jet_pts,
+            "mass": reco_jet_masses,
+            "eta": reco_jet_etas,
+            "phi": reco_jet_phis,
         }
 
     def _delta_phi(self, phi1, phi2):
@@ -172,9 +172,10 @@ class ReconstructionMonitor(Callback):
         if self.compute_jet_metrics:
             # Compute jets from original and reconstructed constituents
 
-            # ToDo: decide whether to get the truth jets from the jet array, or to compute them from unscaled constituents. 
+            # ToDo: decide whether to get the truth jets from the jet array, or to compute
+            # them from unscaled constituents.
             # the latter might assume less about the reconstruction?
-            '''
+            """
             jet_truth = {
                 "pt": original_unscaled["jets"][:, self.jet_pt_idx].cpu().numpy(),
                 "mass": original_unscaled["jets"][:, self.jet_mass_idx].cpu().numpy(),
@@ -183,9 +184,13 @@ class ReconstructionMonitor(Callback):
                     original_unscaled["jets"][:, self.jet_phi_idx].cpu().numpy(), 0.0
                 ),
             }
-            '''
-            jet_truth = self._compute_jet_from_constituents(original_unscaled["csts"], mask, original_unscaled["jets"])
-            jet_reco = self._compute_jet_from_constituents(recon_unscaled["csts"], mask, original_unscaled["jets"])
+            """
+            jet_truth = self._compute_jet_from_constituents(
+                original_unscaled["csts"], mask, original_unscaled["jets"]
+            )
+            jet_reco = self._compute_jet_from_constituents(
+                recon_unscaled["csts"], mask, original_unscaled["jets"]
+            )
 
             # Compute pt residuals and radial distance
             pt_residuals = jet_truth["pt"] - jet_reco["pt"]
@@ -222,7 +227,7 @@ class ReconstructionMonitor(Callback):
                 "radial_dist": radial_distance,
                 "truth_pt": jet_truth["pt"],
                 "pt_ratio": pt_ratio,
-                "reco_pt" : jet_reco["pt"],
+                "reco_pt": jet_reco["pt"],
             }
 
             # Store for epoch-level aggregation
@@ -284,7 +289,7 @@ class ReconstructionMonitor(Callback):
             plt.style.use(hep.style.CMS)
 
             # Create residual plots
-            plot_order = ["pt", "mass", "eta", "phi", "radial_dist", "truth_pt","reco_pt"]
+            plot_order = ["pt", "mass", "eta", "phi", "radial_dist", "truth_pt", "reco_pt"]
             labels = {
                 "pt": "Jet pt residual (truth - reco)",
                 "mass": "Jet mass residual (truth - reco)",
@@ -322,7 +327,8 @@ class ReconstructionMonitor(Callback):
                     )
                 else:
                     # Plot central quantile range to suppress extreme tails for now.
-                    # Todo: understand why extreme tails are happening. we saw residuals -4e5 MeV. problem with the inverse transform?
+                    # Todo: understand why extreme tails are happening. we saw residuals
+                    # -4e5 MeV. problem with the inverse transform?
                     q_low, q_high = np.percentile(residuals, [1, 99])
                     residuals_plot = residuals[(residuals >= q_low) & (residuals <= q_high)]
                     # Plot histogram
@@ -419,11 +425,14 @@ class ReconstructionMonitor(Callback):
                 )
 
             ax.set_xlim(pt_min, pt_max)
-            ax.set_ylim(0., np.nanmax(iqr_over_median) * 2)
-            ax.set_xlabel("Truth jet $p_T$ [MeV]",fontsize=12)
-            ax.set_ylabel("IQR(reco/truth) / median(reco/truth)",fontsize=12)
+            ax.set_ylim(0.0, np.nanmax(iqr_over_median) * 2)
+            ax.set_xlabel("Truth jet $p_T$ [MeV]", fontsize=12)
+            ax.set_ylabel("IQR(reco/truth) / median(reco/truth)", fontsize=12)
             fig.tight_layout()
             trainer.logger.experiment.log(
-                {"val/jet_pt_response_iqr_over_median_vs_truth_pt": wandb.Image(fig), "epoch": trainer.current_epoch}
+                {
+                    "val/jet_pt_response_iqr_over_median_vs_truth_pt": wandb.Image(fig),
+                    "epoch": trainer.current_epoch,
+                }
             )
             plt.close(fig)

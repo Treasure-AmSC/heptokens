@@ -3,8 +3,8 @@ from pathlib import Path
 
 # Configuration
 DATA_PATH = Path("/sdf/scratch/users/s/samklein/data/atlas/mc-flavtag-ttbar-small.h5")
-RESOURCES_DIR = DATA_PATH.parent / "resources"
-OUTPUT_DIR = Path("/sdf/group/mli/samklein/code/gold_diggers/results/preprocessing_study")
+RESOURCES_DIR = DATA_PATH.parent
+OUTPUT_DIR = Path("/sdf/group/mli/samklein/code/gold_diggers/results/preprocessing_better")
 NUM_JETS = 5_000_000
 
 # Define preprocessing configurations
@@ -37,14 +37,16 @@ PREPROCESS_CONFIGS = {
 
 rule all:
     input:
-        # All VQ-VAE models
         expand(
             OUTPUT_DIR / "vqvae/{preprocess}/SUCCESS.txt",
             preprocess=PREPROCESS_CONFIGS.keys(),
         ),
-        # All classifiers
         expand(
             OUTPUT_DIR / "classifier/{preprocess}/SUCCESS.txt",
+            preprocess=PREPROCESS_CONFIGS.keys(),
+        ),
+        expand(
+            OUTPUT_DIR / "feature_classifier/{preprocess}/SUCCESS.txt",
             preprocess=PREPROCESS_CONFIGS.keys(),
         ),
 
@@ -83,6 +85,8 @@ rule create_preprocessor:
             --jet_mode {params.jet_mode} \
             --n_quantiles {params.n_quantiles} \
             --output_dir {params.output_dir} \
+            --num_jets 5_000_000 \
+            --num_csts 40 \
             {params.cst_log_features} \
             {params.jet_log_features} \
         """
@@ -137,6 +141,32 @@ rule train_classifier:
             network_name={wildcards.preprocess} \
             model=token_classifier \
             model.tokenizer_ckpt={input.vqvae_ckpt} \
+            datamodule.num_jets={NUM_JETS} \
+            datamodule.transforms.preprocess.cst_fn.filename={input.cst_transformer} \
+            datamodule.transforms.preprocess.jet_fn.filename={input.jet_transformer} \
+            trainer.max_epochs=30 \
+            +trainer.num_sanity_val_steps=0 \
+            callbacks=classify
+        """
+
+rule train_feature_classifier:
+    """Train feature classifier with specific preprocessing."""
+    input:
+        cst_transformer=RESOURCES_DIR / "preprocessing/{preprocess}/cst_quantiles.joblib",
+        jet_transformer=RESOURCES_DIR / "preprocessing/{preprocess}/jet_quantiles.joblib",
+    output:
+        success=OUTPUT_DIR / "feature_classifier/{preprocess}/SUCCESS.txt",
+    params:
+        output_dir=OUTPUT_DIR,
+    group:
+        "single_preprocessors",
+    shell:
+        """
+        pixi run python scripts/train.py \
+            output_dir={params.output_dir} \
+            project_name=feature_classifier \
+            network_name={wildcards.preprocess} \
+            model=feature_classifier \
             datamodule.num_jets={NUM_JETS} \
             datamodule.transforms.preprocess.cst_fn.filename={input.cst_transformer} \
             datamodule.transforms.preprocess.jet_fn.filename={input.jet_transformer} \

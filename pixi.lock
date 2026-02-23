@@ -1242,16 +1242,6 @@ packages:
   - pkg:pypi/fsspec?source=hash-mapping
   size: 145678
   timestamp: 1756908673345
-- pypi: ./
-  name: gdig
-  version: 0.1.0
-  sha256: a7f7784688ebeb217e349889a393b4faeef06db9869792c9e64d6cf5a6c5f482
-  requires_dist:
-  - torchpq>=0.3.0.6,<0.4
-  - snakemake>=9.13.7,<10
-  - snakemake-executor-plugin-slurm>=2.0.0,<3
-  requires_python: '>=3.11'
-  editable: true
 - conda: https://conda.anaconda.org/conda-forge/linux-64/giflib-5.2.2-hd590300_0.conda
   sha256: aac402a8298f0c0cc528664249170372ef6b37ac39fdc92b40601a6aed1e32ff
   md5: 3bf7b9fd5a7136126e0234db4b87c8b6
@@ -3858,6 +3848,16 @@ packages:
   - pkg:pypi/pyyaml?source=hash-mapping
   size: 195537
   timestamp: 1758892104856
+- pypi: ./
+  name: qhep
+  version: 0.1.0
+  sha256: 965f567ff49c91389cfa38af2f7f4a462e3e181223b279eb0c593cfa3fe91d9f
+  requires_dist:
+  - torchpq>=0.3.0.6,<0.4
+  - snakemake>=9.13.7,<10
+  - snakemake-executor-plugin-slurm>=2.0.0,<3
+  requires_python: '>=3.11'
+  editable: true
 - conda: https://conda.anaconda.org/conda-forge/linux-64/qhull-2020.2-h434a139_5.conda
   sha256: 776363493bad83308ba30bcb88c2552632581b143e8ee25b1982c8c743e73abc
   md5: 353823361b1d27eb3960efb076dfcaf6

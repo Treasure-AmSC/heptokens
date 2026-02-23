@@ -6,8 +6,8 @@ from pathlib import Path
 
 from joblib import dump
 
-from gdig.data.atlas_mappable import SingleFileMapModule
-from gdig.data.transforms import create_preprocessing_transformer
+from qhep.data.atlas_mappable import SingleFileMapModule
+from qhep.data.transforms import create_preprocessing_transformer
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)

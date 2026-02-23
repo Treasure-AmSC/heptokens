@@ -8,9 +8,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, IterableDataset
 
-from gdig.data.atlas_mappable import BaseMapModule
-from gdig.data.collation import collate_and_transform
-from gdig.utils.plot_physics import JET_FEATURES, TRACK_FEATURES
+from qhep.data.atlas_mappable import BaseMapModule
+from qhep.data.collation import collate_and_transform
+from qhep.utils.plot_physics import JET_FEATURES, TRACK_FEATURES
 
 log = logging.getLogger(__name__)
 

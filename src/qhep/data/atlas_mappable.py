@@ -10,8 +10,8 @@ import torch
 from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, random_split
 
-from gdig.data.collation import collate_and_transform
-from gdig.utils.plot_physics import JET_FEATURES, TRACK_FEATURES, load_jets_table
+from qhep.data.collation import collate_and_transform
+from qhep.utils.plot_physics import JET_FEATURES, TRACK_FEATURES, load_jets_table
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +107,9 @@ class BaseMapModule(LightningDataModule, ABC):
         self.num_workers = num_workers
         self.batch_size = batch_size
         self.pin_memory = pin_memory
-        self.persistent_workers = num_workers > 0 if persistent_workers is None else persistent_workers
+        self.persistent_workers = (
+            num_workers > 0 if persistent_workers is None else persistent_workers
+        )
         self.multiprocessing_context = multiprocessing_context
         self.transforms = transforms
         self.data_config = data_config

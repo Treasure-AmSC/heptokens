@@ -1,5 +1,11 @@
-# gdig (Gold Diggers)
-Tokenization and downstream classification workflows for ATLAS-style jet data.
+# qhep
+High-energy physics quantization and tokenization framework.
+
+[![pytorch](https://img.shields.io/badge/-PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![lightning](https://img.shields.io/badge/-Lightning-792EE5?logo=lightning&logoColor=white)](https://lightning.ai/)
+[![hydra](https://img.shields.io/badge/-Hydra-89b8cd?logo=hydra&logoColor=white)](https://hydra.cc/)
+[![wandb](https://img.shields.io/badge/-WandB-orange?logo=weightsandbiases&logoColor=white)](https://wandb.ai)
+[![pixi](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/prefix-dev/pixi/main/assets/badge/v0.json)](https://pixi.sh)
 
 This repository is built around Hydra configs, Lightning training loops, and Pixi-managed environments.
 
@@ -21,7 +27,7 @@ pixi run python scripts/train.py ...
 ## Repository Layout
 - `scripts/`: entry points for training, preprocessing, plotting, and profiling.
 - `configs/`: Hydra config groups for models, callbacks, datamodules, and training defaults.
-- `src/gdig/`: library code (models, dataloaders, callbacks, utilities).
+- `src/qhep/`: library code (models, dataloaders, callbacks, utilities).
 - `workflow/`: Snakemake workflows for larger experiment grids.
 - `profiles/`: Snakemake executor profiles (`local`, `s3df`/Slurm).
 

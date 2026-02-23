@@ -1,11 +1,11 @@
 ---
 # configs/model/vqvae.yaml
-_target_: gdig.models.vq_vae.LitVqVae
+_target_: qhep.models.vq_vae.LitVqVae
 encoder:
-  _target_: gdig.models.coders.Encoder
+  _target_: qhep.models.coders.Encoder
   _partial_: true
 decoder:
-  _target_: gdig.models.coders.Decoder
+  _target_: qhep.models.coders.Decoder
   _partial_: true
 codebook_size: 512
 codebook_dim: 6

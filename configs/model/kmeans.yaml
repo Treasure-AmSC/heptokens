@@ -1,5 +1,5 @@
 ---
-_target_: gdig.models.kmeans.LitMinibatchKMeans
+_target_: qhep.models.kmeans.LitMinibatchKMeans
 n_clusters: 128
 distance: euclidean    # or "cosine", "manhattan"
 init_mode: kmeans++    # or "random"

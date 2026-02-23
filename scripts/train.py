@@ -8,7 +8,7 @@ import lightning.pytorch as pl
 import torch as T
 from omegaconf import DictConfig
 
-from gdig.utils.hydra import (
+from qhep.utils.hydra import (
     instantiate_collection,
     log_hyperparameters,
     print_config,
