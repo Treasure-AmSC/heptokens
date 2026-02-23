@@ -31,3 +31,7 @@ reconstruction_monitor:
     _target_: joblib.load
     filename: ${datamodule.transforms.preprocess.jet_fn.filename}
   log_every_n_epochs: 1
+  iqr_med_pt_min: 5000.0
+  iqr_med_pt_max: 140000.0
+  iqr_med_n_bins: 20
+  iqr_med_min_entries_per_bin: 10

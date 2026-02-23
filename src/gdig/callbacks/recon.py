@@ -35,6 +35,10 @@ class ReconstructionMonitor(Callback):
         jet_eta_idx: int = 2,
         jet_phi_idx: int = 3,
         compute_jet_metrics: bool = True,
+        iqr_med_pt_min: float = 5_000.0,
+        iqr_med_pt_max: float = 140_000.0,
+        iqr_med_n_bins: int = 20,
+        iqr_med_min_entries_per_bin: int = 10,
     ):
         super().__init__()
         self.cst_fn = cst_fn
@@ -49,6 +53,10 @@ class ReconstructionMonitor(Callback):
         self.jet_eta_idx = jet_eta_idx
         self.jet_phi_idx = jet_phi_idx
         self.compute_jet_metrics = compute_jet_metrics
+        self.iqr_med_pt_min = iqr_med_pt_min
+        self.iqr_med_pt_max = iqr_med_pt_max
+        self.iqr_med_n_bins = iqr_med_n_bins
+        self.iqr_med_min_entries_per_bin = iqr_med_min_entries_per_bin
 
         if compute_jet_metrics:
             # Store jet metrics across batches for epoch-level summary
@@ -181,6 +189,14 @@ class ReconstructionMonitor(Callback):
 
             # Compute pt residuals and radial distance
             pt_residuals = jet_truth["pt"] - jet_reco["pt"]
+
+            pt_ratio = np.divide(
+                jet_reco["pt"],
+                jet_truth["pt"],
+                out=np.full_like(jet_reco["pt"], np.nan),
+                where=jet_truth["pt"] > 0,
+            )
+
             mass_residuals = jet_truth["mass"] - jet_reco["mass"]
             eta_residuals = jet_truth["eta"] - jet_reco["eta"]
             phi_residuals = self._delta_phi(jet_truth["phi"], jet_reco["phi"])
@@ -204,6 +220,9 @@ class ReconstructionMonitor(Callback):
                 "eta": eta_residuals,
                 "phi": phi_residuals,
                 "radial_dist": radial_distance,
+                "truth_pt": jet_truth["pt"],
+                "pt_ratio": pt_ratio,
+                "reco_pt" : jet_reco["pt"],
             }
 
             # Store for epoch-level aggregation
@@ -265,13 +284,15 @@ class ReconstructionMonitor(Callback):
             plt.style.use(hep.style.CMS)
 
             # Create residual plots
-            plot_order = ["pt", "mass", "eta", "phi", "radial_dist"]
+            plot_order = ["pt", "mass", "eta", "phi", "radial_dist", "truth_pt","reco_pt"]
             labels = {
                 "pt": "Jet pt residual (truth - reco)",
                 "mass": "Jet mass residual (truth - reco)",
                 "eta": "Jet eta residual (truth - reco)",
                 "phi": "Jet phi residual (truth - reco)",
                 "radial_dist": "Constituent radial distance",
+                "truth_pt": "Truth jet pt [MeV]",
+                "reco_pt": "Reconstructed jet pt [MeV]",
             }
             vars_to_plot = [key for key in plot_order if key in all_residuals]
             n_vars = len(vars_to_plot)
@@ -330,5 +351,79 @@ class ReconstructionMonitor(Callback):
             fig.tight_layout()
             trainer.logger.experiment.log(
                 {"val/jet_residuals": wandb.Image(fig), "epoch": trainer.current_epoch}
+            )
+            plt.close(fig)
+
+            truth_pt = all_residuals.get("truth_pt")
+            pt_ratio = all_residuals.get("pt_ratio")
+            if truth_pt is None or pt_ratio is None:
+                return
+            truth_pt = np.asarray(truth_pt).reshape(-1)
+            pt_ratio = np.asarray(pt_ratio).reshape(-1)
+            if truth_pt.size != pt_ratio.size:
+                min_size = min(truth_pt.size, pt_ratio.size)
+                log.warning(
+                    "Mismatched truth_pt (%d) and pt_ratio (%d) lengths; truncating to %d.",
+                    truth_pt.size,
+                    pt_ratio.size,
+                    min_size,
+                )
+                truth_pt = truth_pt[:min_size]
+                pt_ratio = pt_ratio[:min_size]
+
+            finite_mask = np.isfinite(truth_pt) & np.isfinite(pt_ratio) & (pt_ratio > 0)
+            truth_pt = truth_pt[finite_mask]
+            pt_ratio = pt_ratio[finite_mask]
+            if truth_pt.size == 0:
+                return
+
+            pt_min = self.iqr_med_pt_min
+            pt_max = self.iqr_med_pt_max
+            n_bins = self.iqr_med_n_bins
+            min_entries_per_bin = self.iqr_med_min_entries_per_bin
+
+            pt_bin_edges = np.linspace(pt_min, pt_max, n_bins + 1)
+            pt_bin_centers = 0.5 * (pt_bin_edges[:-1] + pt_bin_edges[1:])
+            iqr_over_median = np.full(n_bins, np.nan)
+
+            for i in range(n_bins):
+                in_bin = truth_pt >= pt_bin_edges[i]
+                if i == n_bins - 1:
+                    in_bin &= truth_pt <= pt_bin_edges[i + 1]
+                else:
+                    in_bin &= truth_pt < pt_bin_edges[i + 1]
+
+                ratios_in_bin = pt_ratio[in_bin]
+                if ratios_in_bin.size < min_entries_per_bin:
+                    continue
+
+                median = np.median(ratios_in_bin)
+                if not np.isfinite(median) or median <= 0:
+                    continue
+
+                q25, q75 = np.percentile(ratios_in_bin, [25, 75])
+                iqr_over_median[i] = (q75 - q25) / median
+
+            fig, ax = plt.subplots(figsize=(6, 6))
+            valid = np.isfinite(iqr_over_median)
+            if np.any(valid):
+                ax.plot(pt_bin_centers[valid], iqr_over_median[valid], marker="o", linewidth=0)
+            else:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "No bins with sufficient entries",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                )
+
+            ax.set_xlim(pt_min, pt_max)
+            ax.set_ylim(0., np.nanmax(iqr_over_median) * 2)
+            ax.set_xlabel("Truth jet $p_T$ [MeV]",fontsize=12)
+            ax.set_ylabel("IQR(reco/truth) / median(reco/truth)",fontsize=12)
+            fig.tight_layout()
+            trainer.logger.experiment.log(
+                {"val/jet_pt_response_iqr_over_median_vs_truth_pt": wandb.Image(fig), "epoch": trainer.current_epoch}
             )
             plt.close(fig)
