@@ -49,6 +49,10 @@ rule all:
             OUTPUT_DIR / "feature_classifier/{preprocess}/SUCCESS.txt",
             preprocess=PREPROCESS_CONFIGS.keys(),
         ),
+        expand(
+            OUTPUT_DIR / "roc_comparison/{preprocess}.pdf",
+            preprocess=PREPROCESS_CONFIGS.keys(),
+        ),
 
 
 rule create_preprocessor:
@@ -173,4 +177,33 @@ rule train_feature_classifier:
             trainer.max_epochs=30 \
             +trainer.num_sanity_val_steps=0 \
             callbacks=classify
+        """
+
+
+rule compare_roc:
+    """Compare ROC curves: feature classifier vs token classifier per preprocessing."""
+    input:
+        classifier_success=expand(
+            OUTPUT_DIR / "classifier/{preprocess}/SUCCESS.txt",
+            preprocess=PREPROCESS_CONFIGS.keys(),
+        ),
+        feature_success=expand(
+            OUTPUT_DIR / "feature_classifier/{preprocess}/SUCCESS.txt",
+            preprocess=PREPROCESS_CONFIGS.keys(),
+        ),
+    output:
+        plots=expand(
+            OUTPUT_DIR / "roc_comparison/{preprocess}.pdf",
+            preprocess=PREPROCESS_CONFIGS.keys(),
+        ),
+    params:
+        results_dir=OUTPUT_DIR,
+        data_path=DATA_PATH,
+        output_dir=OUTPUT_DIR / "roc_comparison",
+    shell:
+        """
+        pixi run python scripts/compare_roc.py \
+            --results_dir {params.results_dir} \
+            --data_path {params.data_path} \
+            --output_dir {params.output_dir}
         """
