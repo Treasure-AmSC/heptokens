@@ -1,11 +1,11 @@
 ---
 # configs/model/transformer_vqvae.yaml
-_target_: qhep.models.vq_vae.LitVqVae
+_target_: heptokens.models.vq_vae.LitVqVae
 encoder:
-  _target_: qhep.models.coders.Encoder
+  _target_: heptokens.models.coders.Encoder
   _partial_: true
   model:
-    _target_: qhep.models.transformer.Transformer
+    _target_: heptokens.models.transformer.Transformer
     _partial_: true
     d_model: 128
     n_heads: 8
@@ -14,10 +14,10 @@ encoder:
     dropout: 0.
     activation: gelu
 decoder:
-  _target_: qhep.models.coders.DiffusionDecoder
+  _target_: heptokens.models.coders.DiffusionDecoder
   _partial_: true
   model:
-    _target_: qhep.models.transformer.Transformer
+    _target_: heptokens.models.transformer.Transformer
     _partial_: true
     d_model: 128
     n_heads: 8

@@ -1,5 +1,5 @@
 ---
-_target_: qhep.models.token_classifier.TokenClassifier
+_target_: heptokens.models.token_classifier.TokenClassifier
 codebook_size: 512
 num_quantizers: 3
 d_model: 128
@@ -10,5 +10,5 @@ dropout: 0.0
 activation: gelu
 pooling: mean
 learning_rate: 1.0e-3
-tokenizer_ckpt: /sdf/group/mli/samklein/code/qhep/results/test_project/test/checkpoints/last.ckpt
+tokenizer_ckpt: /sdf/group/mli/samklein/code/heptokens/results/test_project/test/checkpoints/last.ckpt
 aggregate_tokens: flatten

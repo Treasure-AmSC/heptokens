@@ -8,7 +8,7 @@ from torch.nn.functional import cross_entropy
 from torchmetrics import Accuracy
 
 if TYPE_CHECKING:
-    from qhep.models.utils import JetBackbone
+    from heptokens.models.utils import JetBackbone
 
 log = logging.getLogger(__name__)
 

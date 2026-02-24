@@ -1435,6 +1435,16 @@ packages:
   purls: []
   size: 3308443
   timestamp: 1753356976982
+- pypi: ./
+  name: heptokens
+  version: 0.1.0
+  sha256: 094ea8c86986047ccf2f178a443f1b0da23f0ce0d6306ac942815a8678b9c2b7
+  requires_dist:
+  - torchpq>=0.3.0.6,<0.4
+  - snakemake>=9.13.7,<10
+  - snakemake-executor-plugin-slurm>=2.0.0,<3
+  requires_python: '>=3.11'
+  editable: true
 - conda: https://conda.anaconda.org/conda-forge/noarch/hpack-4.1.0-pyhd8ed1ab_0.conda
   sha256: 6ad78a180576c706aabeb5b4c8ceb97c0cb25f1e112d76495bff23e3779948ba
   md5: 0a802cb9888dd14eeefc611f05c40b6e
@@ -3848,16 +3858,6 @@ packages:
   - pkg:pypi/pyyaml?source=hash-mapping
   size: 195537
   timestamp: 1758892104856
-- pypi: ./
-  name: qhep
-  version: 0.1.0
-  sha256: 965f567ff49c91389cfa38af2f7f4a462e3e181223b279eb0c593cfa3fe91d9f
-  requires_dist:
-  - torchpq>=0.3.0.6,<0.4
-  - snakemake>=9.13.7,<10
-  - snakemake-executor-plugin-slurm>=2.0.0,<3
-  requires_python: '>=3.11'
-  editable: true
 - conda: https://conda.anaconda.org/conda-forge/linux-64/qhull-2020.2-h434a139_5.conda
   sha256: 776363493bad83308ba30bcb88c2552632581b143e8ee25b1982c8c743e73abc
   md5: 353823361b1d27eb3960efb076dfcaf6

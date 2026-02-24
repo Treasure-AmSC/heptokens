@@ -10,8 +10,8 @@ import torch
 from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, random_split
 
-from qhep.data.collation import collate_and_transform
-from qhep.utils.plot_physics import JET_FEATURES, TRACK_FEATURES, load_jets_table
+from heptokens.data.collation import collate_and_transform
+from heptokens.utils.plot_physics import JET_FEATURES, TRACK_FEATURES, load_jets_table
 
 log = logging.getLogger(__name__)
 

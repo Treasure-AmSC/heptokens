@@ -11,7 +11,7 @@ defaults:
 seed: 42  # For reproducibility
 project_name: test_project  # Determines output directory path and wandb project
 network_name: test  # Used for both saving and wandb
-output_dir: /sdf/group/mli/samklein/code/qhep/results
+output_dir: /sdf/group/mli/samklein/code/heptokens/results
 ckpt_path:  # Checkpoint path to resume training
 weight_ckpt_path:  # Checkpoint path to load weights (but not optimizers etc)
 save_test_preds: false  # After training, save test predictions to disk

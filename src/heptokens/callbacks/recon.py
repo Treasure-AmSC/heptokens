@@ -6,8 +6,8 @@ import torch as T
 from lightning.pytorch.callbacks import Callback
 from sklearn.base import BaseEstimator
 
-from qhep.data.collation import inverse_preprocess_batch
-from qhep.utils.torch_utils import dict_to_device
+from heptokens.data.collation import inverse_preprocess_batch
+from heptokens.utils.torch_utils import dict_to_device
 
 log = logging.getLogger(__name__)
 

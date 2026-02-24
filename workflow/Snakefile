@@ -5,7 +5,7 @@ from pathlib import Path
 n_jets = [10_000_000]
 # tokenizers = ["kmeans"]  # TODO: unclear how to integrate this one, useful as a baseline!
 tokenizers = ["vqvae", "transformer_vqvae", "set2vec_vqvae", "diffusion_vqvae"]
-output_dir = Path("/sdf/group/mli/samklein/code/qhep/results/long_run")
+output_dir = Path("/sdf/group/mli/samklein/code/heptokens/results/long_run")
 # TODO: set trainer.max_epochs=30 properly
 
 rule all:

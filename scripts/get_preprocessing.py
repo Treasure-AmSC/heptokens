@@ -6,8 +6,8 @@ from pathlib import Path
 
 from joblib import dump
 
-from qhep.data.atlas_mappable import SingleFileMapModule
-from qhep.data.transforms import create_preprocessing_transformer
+from heptokens.data.atlas_mappable import SingleFileMapModule
+from heptokens.data.transforms import create_preprocessing_transformer
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)

@@ -14,7 +14,7 @@ from lightning import LightningModule
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from qhep.utils.hydra import (
+from heptokens.utils.hydra import (
     print_config,
     reload_original_config,
 )

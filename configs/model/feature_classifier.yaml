@@ -1,5 +1,5 @@
 ---
-_target_: qhep.models.token_classifier.FeatureClassifier
+_target_: heptokens.models.token_classifier.FeatureClassifier
 d_model: 128
 n_heads: 8
 num_layers: 4

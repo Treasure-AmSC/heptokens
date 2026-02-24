@@ -7,7 +7,7 @@ from typing import Any
 from lightning import Callback, LightningModule, Trainer
 from torch.optim import Optimizer
 
-from qhep.utils.torch_utils import (
+from heptokens.utils.torch_utils import (
     get_activations,
     get_submodules,
     gradient_norm,

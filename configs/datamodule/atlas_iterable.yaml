@@ -1,5 +1,5 @@
 ---
-_target_: qhep.data.atlas_iterable.SingleFileIterModule
+_target_: heptokens.data.atlas_iterable.SingleFileIterModule
 
 # Data path
 data_path: /sdf/scratch/users/s/samklein/data/atlas/mc-flavtag-ttbar-small.h5
@@ -27,7 +27,7 @@ multiprocessing_context: spawn
 # Optional transforms (instantiated separately)  TODO: improve this
 transforms:
   preprocess:
-    _target_: qhep.data.collation.preprocess_batch
+    _target_: heptokens.data.collation.preprocess_batch
     _partial_: true
     cst_fn:
       _target_: joblib.load

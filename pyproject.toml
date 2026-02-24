@@ -1,5 +1,5 @@
 [project]
-name = "qhep"
+name = "heptokens"
 version = "0.1.0"
 authors = [{ name = "Samuel Klein", email = "samuel.byrne.klein@gmail.com" }]
 requires-python = ">=3.11"
@@ -14,7 +14,7 @@ channels = ["pytorch", "nvidia", "conda-forge", "pypi"]
 platforms = ["linux-64", "osx-arm64"]
 
 [tool.pixi.pypi-dependencies]
-qhep = { path = ".", editable = true }
+heptokens = { path = ".", editable = true }
 
 [tool.pixi.dependencies]
 pre-commit = ">=4.3.0,<5"
@@ -56,4 +56,4 @@ select = [
 ignore = []
 
 [tool.ruff.lint.isort]
-known-first-party = ["qhep"]
+known-first-party = ["heptokens"]

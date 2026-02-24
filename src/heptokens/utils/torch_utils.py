@@ -16,7 +16,7 @@ from torch.optim.optimizer import Optimizer
 from torch.utils.data import Dataset, Subset, random_split
 from torch.utils.data.dataloader import default_collate
 
-from qhep.utils.schedulers import CyclicWithWarmup, LinearWarmupRootDecay, WarmupToConstant
+from heptokens.utils.schedulers import CyclicWithWarmup, LinearWarmupRootDecay, WarmupToConstant
 
 
 class ParameterNoWD(nn.Parameter):

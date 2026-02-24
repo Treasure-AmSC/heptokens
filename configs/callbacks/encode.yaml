@@ -6,7 +6,7 @@ lr_monitor:
   _target_: lightning.pytorch.callbacks.LearningRateMonitor
   logging_interval: step
 activation_monitor:
-  _target_: qhep.callbacks.monitor.ActivationMonitor
+  _target_: heptokens.callbacks.monitor.ActivationMonitor
   logging_interval: 200
   layer_regex:
     - .*\.sa.fn$
@@ -23,7 +23,7 @@ checkpoint_per_epoch:
   enable_version_counter: false
   auto_insert_metric_name: false
 reconstruction_monitor:
-  _target_: qhep.callbacks.recon.ReconstructionMonitor
+  _target_: heptokens.callbacks.recon.ReconstructionMonitor
   cst_fn:
     _target_: joblib.load
     filename: ${datamodule.transforms.preprocess.cst_fn.filename}

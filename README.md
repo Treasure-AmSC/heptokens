@@ -1,4 +1,4 @@
-# qhep
+# heptokens
 High-energy physics quantization and tokenization framework.
 
 [![pytorch](https://img.shields.io/badge/-PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
@@ -27,7 +27,7 @@ pixi run python scripts/train.py ...
 ## Repository Layout
 - `scripts/`: entry points for training, preprocessing, plotting, and profiling.
 - `configs/`: Hydra config groups for models, callbacks, datamodules, and training defaults.
-- `src/qhep/`: library code (models, dataloaders, callbacks, utilities).
+- `src/heptokens/`: library code (models, dataloaders, callbacks, utilities).
 - `workflow/`: Snakemake workflows for larger experiment grids.
 - `profiles/`: Snakemake executor profiles (`local`, `s3df`/Slurm).
 

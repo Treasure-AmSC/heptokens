@@ -1,4 +1,4 @@
-# In src/qhep/callbacks/roc_plots.py (new file)
+# In src/heptokens/callbacks/roc_plots.py (new file)
 import matplotlib.pyplot as plt
 import mplhep as hep
 import numpy as np
