@@ -1,50 +1,48 @@
-"""Compare ROC curves across feature classifiers and token (VQ-VAE) classifiers.
+"""Compare ROC curves across arbitrary classifier runs.
 
-For each preprocessing configuration (e.g. quantile_500), loads both a
-feature_classifier and a token classifier checkpoint, runs inference on the
-validation split, and saves a HEP-style signal efficiency vs background
-rejection plot.
+Each run is specified by a directory containing ``full_config.yaml`` and a
+``checkpoints/`` folder.  Any number of runs can be compared on a single plot.
 
 Usage
 -----
 pixi run python scripts/compare_roc.py \
-    --results_dir results/preprocessing_better \
-    --data_path /sdf/scratch/users/s/samklein/data/atlas/mc-flavtag-ttbar-small.h5
+    --run_dirs results/long_run/classifier/feature_cf_10000000 \
+               results/preprocessing_study/classifier/quantile_100 \
+    --run_labels "feature (10M)" "token (quantile_100)" \
+    --data_path /sdf/scratch/users/s/samklein/data/atlas/mc-flavtag-ttbar-small.h5 \
+    --output_dir results/roc_comparison \
+    --output_name my_comparison
 
-One PDF per preprocessing is written to --output_dir
-(default: {results_dir}/roc_comparison/).
+Outputs:
+  {output_dir}/{output_name}.pdf       — HEP-style ROC plot
+  {output_dir}/{output_name}_auc.csv   — per-class and macro-average AUC
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import gc
 import logging
 from pathlib import Path
 
 import h5py
+import hydra.utils as hu
 import matplotlib.pyplot as plt
-import mplhep as hep
 import numpy as np
 import torch as T
 from omegaconf import DictConfig, OmegaConf
 from sklearn.metrics import auc, roc_curve
 
 # Register custom OmegaConf resolvers (int_div, min, max, if, …) used in saved configs
-import qhep.utils.hydra as _qhep_hydra  # noqa: F401  (side-effect import)
-from qhep.utils.hydra import reload_original_config
+import heptokens.utils.hydra as _qhep_hydra  # noqa: F401  (side-effect import)
+from heptokens.utils.hydra import reload_original_config
 
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Label mapping
 # ---------------------------------------------------------------------------
-# MapDataset remaps sorted unique PDG IDs to contiguous indices.
-# For the ATLAS ttbar dataset with n_classes=4 the classes are:
-#   PDG 0  -> index 0  (light-flavour jets)
-#   PDG 4  -> index 1  (charm jets)
-#   PDG 5  -> index 2  (b jets)
-#   PDG 15 -> index 3  (tau jets)
-# This map is used only for axis labels; it does not affect inference.
 DEFAULT_CLASS_NAMES: dict[int, str] = {
     0: "light",
     1: "c",
@@ -56,15 +54,12 @@ DEFAULT_CLASS_NAMES: dict[int, str] = {
 def get_class_names(
     data_path: str, label_key: str = "HadronConeExclTruthLabelID"
 ) -> dict[int, str]:
-    """Derive the class-index-to-name mapping from the raw HDF5 label column.
-
-    Falls back to DEFAULT_CLASS_NAMES on any error.
-    """
+    """Derive the class-index-to-name mapping from the raw HDF5 label column."""
     pdg_to_name = {0: "light", 4: "c", 5: "b", 15: r"$\tau$"}
     try:
         with h5py.File(data_path, "r") as f:
             raw = f["jets"][label_key][:10_000]
-        unique_pdg = sorted(np.unique(raw).tolist())
+        unique_pdg = np.unique(raw).tolist()
         return {i: pdg_to_name.get(int(v), str(int(v))) for i, v in enumerate(unique_pdg)}
     except Exception as exc:
         log.warning("Could not derive class names from data: %s. Using defaults.", exc)
@@ -76,11 +71,73 @@ def get_class_names(
 # ---------------------------------------------------------------------------
 
 
-def override_data_path(cfg: DictConfig, data_path: str) -> DictConfig:
-    """Return a copy of cfg with the datamodule data_path overridden."""
-    cfg = OmegaConf.to_container(cfg, resolve=True)
-    cfg["datamodule"]["data_path"] = data_path
-    return OmegaConf.create(cfg)
+def override_data_path(
+    cfg: DictConfig,
+    data_path: str,
+    max_jets: int | None = None,
+    batch_size: int | None = None,
+) -> DictConfig:
+    """Return a copy of *cfg* with the datamodule data_path overridden.
+
+    Optionally cap the number of jets loaded and override the batch size
+    to keep memory usage under control during inference.
+    """
+    from copy import deepcopy
+
+    cfg = deepcopy(cfg)
+    OmegaConf.update(cfg, "datamodule.data_path", data_path)
+    if max_jets is not None:
+        OmegaConf.update(cfg, "datamodule.num_jets", max_jets)
+    if batch_size is not None:
+        OmegaConf.update(cfg, "datamodule.batch_size", batch_size)
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Transform instantiation helpers
+# ---------------------------------------------------------------------------
+
+
+def _instantiate_transforms(raw_transforms) -> list:
+    """Convert raw transform configs (plain dicts/lists as returned by
+    ``OmegaConf.to_container``) into a list of callables.
+
+    * A ``dict`` whose values are transform configs.
+    * A ``list`` of transform dicts.
+    * Items that are already callable (safety net in case Hydra has already
+      instantiated them in a prior pass).
+    * Items that are dicts with ``_target_``/``_partial_`` keys.
+    """
+    import hydra.utils as hu
+
+    if raw_transforms is None:
+        return []
+
+    # Normalise to a flat list of config-or-callable items
+    if isinstance(raw_transforms, dict) and all(not isinstance(k, int) for k in raw_transforms):
+        # Named dict of transforms (live-config style)
+        items = list(raw_transforms.values())
+    elif isinstance(raw_transforms, list):
+        items = raw_transforms
+    else:
+        items = [raw_transforms]
+
+    callables: list = []
+    for item in items:
+        if callable(item):
+            # Already a callable (e.g. functools.partial from a prior
+            # Hydra recursive instantiation pass)
+            callables.append(item)
+        elif isinstance(item, dict) and "_target_" in item:
+            callables.append(hu.instantiate(item))
+        else:
+            log.warning(
+                "Skipping transform item of type %s that is neither callable "
+                "nor an instantiable config dict: %r",
+                type(item).__name__,
+                item,
+            )
+    return callables
 
 
 # ---------------------------------------------------------------------------
@@ -92,33 +149,54 @@ def run_inference(
     cfg: DictConfig,
     data_path: str,
     device: str = "cpu",
+    max_jets: int | None = None,
+    batch_size: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Instantiate datamodule + model from saved config, load weights, run
     inference over the full validation split.
 
-    ``cfg.ckpt_path`` must already be set (done by ``load_config``).
+    Parameters
+    ----------
+    max_jets : int, optional
+        Cap the total number of jets loaded by the datamodule.  The
+        validation split will be ``val_frac * max_jets``.  500k is more
+        than enough for smooth ROC curves and uses ~360 MB.
+    batch_size : int, optional
+        Override the dataloader batch size for inference.
 
     Returns
     -------
     probs : np.ndarray, shape (N, n_classes)  — softmax probabilities
     labels : np.ndarray, shape (N,)            — integer class indices
     """
-    import hydra.utils as hu
 
-    cfg = override_data_path(cfg, data_path)
+    cfg = override_data_path(cfg, data_path, max_jets=max_jets, batch_size=batch_size)
 
-    # ------------------------------------------------------------------
-    # Datamodule
-    # ------------------------------------------------------------------
-    datamodule = hu.instantiate(cfg.datamodule)
+    # ---- Datamodule -------------------------------------------------------
+    # Convert the entire datamodule sub-config to a plain Python dict so we
+    # can freely mutate it (no OmegaConf struct/read-only limitations).
+    # We then:
+    #   1. Remap all old gdig.* _target_ strings to heptokens.* in-place.
+    #   2. Pop the transforms key so Hydra does NOT attempt to recursively
+    #      instantiate them (which fails for _partial_: true nodes and old
+    #      gdig.* target paths).
+    #   3. Instantiate the datamodule from the cleaned plain dict.
+    #   4. Manually instantiate the transforms and assign them back.
+    dm_dict: dict = OmegaConf.to_container(cfg.datamodule, resolve=False)
+    raw_transforms = dm_dict.pop("transforms", None)
+
+    datamodule = hu.instantiate(dm_dict)
+
+    if raw_transforms is not None:
+        datamodule.transforms = _instantiate_transforms(raw_transforms)
+        log.info("  Instantiated %d transform(s).", len(datamodule.transforms))
+
     datamodule.setup("fit")
 
     data_sample = datamodule.get_data_sample()
     n_classes = datamodule.get_n_classes()
 
-    # ------------------------------------------------------------------
     # Model — instantiate with fresh weights then load saved state_dict
-    # ------------------------------------------------------------------
     model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
     model: T.nn.Module = hu.instantiate(
         model_cfg,
@@ -131,12 +209,12 @@ def run_inference(
         raise FileNotFoundError("No checkpoint path found in config (cfg.ckpt_path is None).")
     ckpt = T.load(ckpt_path, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["state_dict"])
+    del ckpt  # free checkpoint memory immediately
+    gc.collect()
     model.eval()
     model = model.to(device)
 
-    # ------------------------------------------------------------------
     # Inference loop over validation DataLoader
-    # ------------------------------------------------------------------
     val_loader = datamodule.val_dataloader()
     all_probs: list[np.ndarray] = []
     all_labels: list[np.ndarray] = []
@@ -150,34 +228,85 @@ def run_inference(
             all_probs.append(probs)
             all_labels.append(labels)
 
+    # Free model + datamodule before returning
+    del model, datamodule, val_loader
+    gc.collect()
+    if device != "cpu":
+        T.cuda.empty_cache()
+
     return np.concatenate(all_probs, axis=0), np.concatenate(all_labels, axis=0)
+
+
+# ---------------------------------------------------------------------------
+# AUC computation & reporting
+# ---------------------------------------------------------------------------
+
+# Rows: (run_label, class_idx, class_name, auc_value)
+AUCRows = list[tuple[str, int | str, str, float]]
+
+
+def compute_auc_table(
+    results: dict[str, tuple[np.ndarray, np.ndarray]],
+    n_classes: int,
+    class_names: dict[int, str],
+) -> AUCRows:
+    """Compute per-class and macro-average AUC for every run."""
+    rows: AUCRows = []
+    for run_label, (probs, labels) in results.items():
+        class_aucs: list[float] = []
+        for class_idx in range(n_classes):
+            y_true = (labels == class_idx).astype(int)
+            y_score = probs[:, class_idx]
+            fpr, tpr, _ = roc_curve(y_true, y_score)
+            roc_auc = auc(fpr, tpr)
+            class_aucs.append(roc_auc)
+            cname = class_names.get(class_idx, str(class_idx))
+            rows.append((run_label, class_idx, cname, roc_auc))
+        macro = float(np.mean(class_aucs))
+        rows.append((run_label, "macro_avg", "macro_avg", macro))
+    return rows
+
+
+def print_auc_table(rows: AUCRows) -> None:
+    """Pretty-print the AUC table to stdout."""
+    header = f"{'Run':<40s}  {'Class':<12s}  {'AUC':>8s}"
+    print(header)
+    print("-" * len(header))
+    for run_label, _cidx, cname, auc_val in rows:
+        print(f"{run_label:<40s}  {cname:<12s}  {auc_val:>8.5f}")
+
+
+def save_auc_csv(rows: AUCRows, path: Path) -> None:
+    """Write the AUC table to a CSV file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["run_label", "class_idx", "class_name", "auc"])
+        for run_label, cidx, cname, auc_val in rows:
+            writer.writerow([run_label, cidx, cname, f"{auc_val:.6f}"])
+    log.info("Saved AUC table → %s", path)
 
 
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
-# Line styles and labels for each model type
-MODEL_STYLES: dict[str, dict] = {
-    "feature": {"linestyle": "-", "label_suffix": "feature"},
-    "token": {"linestyle": "--", "label_suffix": "token"},
-}
+
+# Auto-cycling line styles for an arbitrary number of runs
+LINE_STYLES = ["-", "--", ":", "-.", (0, (3, 1, 1, 1)), (0, (5, 2)), (0, (1, 1))]
 
 
 def plot_comparison(
-    preprocess_name: str,
     results: dict[str, tuple[np.ndarray, np.ndarray]],
     output_path: Path,
     n_classes: int,
     class_names: dict[int, str] | None = None,
 ) -> None:
-    """Produce a single HEP-style ROC plot comparing feature and token classifiers.
+    """Produce a single HEP-style ROC plot comparing any number of classifiers.
 
     Parameters
     ----------
-    preprocess_name : str
-        Used in the figure title and file name.
     results : dict
-        ``{"feature": (probs, labels), "token": (probs, labels)}``
+        ``{run_label: (probs, labels), ...}``
     output_path : Path
         Where to write the PDF.
     n_classes : int
@@ -188,7 +317,11 @@ def plot_comparison(
     if class_names is None:
         class_names = DEFAULT_CLASS_NAMES
 
-    plt.style.use(hep.style.CMS)
+    # Build a linestyle mapping for each run
+    run_labels = list(results.keys())
+    style_map = {label: LINE_STYLES[i % len(LINE_STYLES)] for i, label in enumerate(run_labels)}
+
+    # plt.style.use(hep.style.CMS)
     fig, ax = plt.subplots(figsize=(8, 8))
 
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
@@ -197,9 +330,7 @@ def plot_comparison(
         color = colors[class_idx % len(colors)]
         class_name = class_names.get(class_idx, str(class_idx))
 
-        for model_key, (probs, labels) in results.items():
-            style = MODEL_STYLES.get(model_key, {"linestyle": ":", "label_suffix": model_key})
-
+        for run_label, (probs, labels) in results.items():
             y_true = (labels == class_idx).astype(int)
             y_score = probs[:, class_idx]
 
@@ -216,25 +347,137 @@ def plot_comparison(
                 tpr[valid],
                 rejection[valid],
                 color=color,
-                linestyle=style["linestyle"],
+                linestyle=style_map[run_label],
                 linewidth=2,
-                label=f"{class_name} — {style['label_suffix']} (AUC={roc_auc:.3f})",
+                label=f"{class_name} — {run_label} (AUC={roc_auc:.3f})",
             )
 
-    ax.set_xlabel("Signal Efficiency", fontsize=14)
-    ax.set_ylabel("Background Rejection (1/FPR)", fontsize=14)
+    ax.set_xlabel("Signal Efficiency", fontsize=18)
+    ax.set_ylabel("Background Rejection (1/FPR)", fontsize=18)
     ax.set_yscale("log")
     ax.set_xlim([0.0, 1.0])
     ax.set_ylim([1, 1e4])
-    ax.legend(loc="upper right", fontsize=9, ncol=1)
+    ax.legend(loc="upper right", fontsize=13, ncol=1)
     ax.grid(True, alpha=0.3)
-    ax.set_title(f"ROC comparison — {preprocess_name}", fontsize=13)
-    hep.cms.label(ax=ax, label="Simulation", data=False, fontsize=12)
+    # hep.cms.label(ax=ax, label="Simulation", data=False, fontsize=12)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
-    log.info("Saved ROC plot → %s", output_path)
+    log.info("Saved one-vs-rest ROC plot → %s", output_path)
+
+
+def _signal_eff_vs_misid(
+    probs: np.ndarray,
+    labels: np.ndarray,
+    signal_idx: int,
+    bkg_idx: int,
+    n_points: int = 2000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute background mis-identification rate as a function of signal efficiency.
+
+    Parameters
+    ----------
+    probs : (N, C) softmax probabilities
+    labels : (N,) integer class indices
+    signal_idx : class index treated as signal (e.g. b-jet = 2)
+    bkg_idx : class index for background flavour
+    n_points : number of threshold steps
+
+    Returns
+    -------
+    sig_eff : (n_points,) signal efficiency values (descending threshold)
+    bkg_misid : (n_points,) mis-identification rate for *bkg_idx* jets
+    """
+    sig_scores = probs[labels == signal_idx, signal_idx]
+    bkg_scores = probs[labels == bkg_idx, signal_idx]
+
+    if len(sig_scores) == 0 or len(bkg_scores) == 0:
+        return np.array([]), np.array([])
+
+    thresholds = np.linspace(0, 1, n_points)
+    sig_eff = np.array([(sig_scores >= t).mean() for t in thresholds])
+    bkg_misid = np.array([(bkg_scores >= t).mean() for t in thresholds])
+    return sig_eff, bkg_misid
+
+
+def plot_btag_roc(
+    results: dict[str, tuple[np.ndarray, np.ndarray]],
+    output_path: Path,
+    n_classes: int,
+    class_names: dict[int, str] | None = None,
+    signal_class: str = "b",
+) -> None:
+    """Produce a standard HEP b-tagging ROC plot.
+
+    X-axis : b-jet (signal) efficiency
+    Y-axis : rejection (1 / mis-ID rate) for each non-signal class
+
+    This gives ``n_classes - 1`` rejection curves per run.
+    """
+    if class_names is None:
+        class_names = DEFAULT_CLASS_NAMES
+
+    # Find the signal class index from the name mapping
+    signal_idx: int | None = None
+    for idx, name in class_names.items():
+        # Strip LaTeX markup for comparison
+        clean = name.replace("$", "").replace(r"\tau", "tau")
+        if clean.lower() == signal_class.lower():
+            signal_idx = idx
+            break
+    if signal_idx is None:
+        log.warning(
+            "Signal class '%s' not found in class_names %s; defaulting to index 2.",
+            signal_class,
+            class_names,
+        )
+        signal_idx = 2
+
+    bkg_indices = [i for i in range(n_classes) if i != signal_idx]
+
+    run_labels = list(results.keys())
+    style_map = {label: LINE_STYLES[i % len(LINE_STYLES)] for i, label in enumerate(run_labels)}
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    for bkg_plot_idx, bkg_idx in enumerate(bkg_indices):
+        color = colors[bkg_plot_idx % len(colors)]
+        bkg_name = class_names.get(bkg_idx, str(bkg_idx))
+
+        for run_label, (probs, labels) in results.items():
+            sig_eff, bkg_misid = _signal_eff_vs_misid(probs, labels, signal_idx, bkg_idx)
+            if len(sig_eff) == 0:
+                continue
+
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rejection = np.where(bkg_misid > 0, 1.0 / bkg_misid, np.nan)
+
+            valid = np.isfinite(rejection) & (rejection < 1e6) & (sig_eff > 0)
+
+            ax.plot(
+                sig_eff[valid],
+                rejection[valid],
+                color=color,
+                linestyle=style_map[run_label],
+                linewidth=2,
+                label=f"{bkg_name} rej. — {run_label}",
+            )
+
+    sig_name = class_names.get(signal_idx, signal_class)
+    ax.set_xlabel(f"{sig_name}-jet Efficiency", fontsize=18)
+    ax.set_ylabel("Background Rejection", fontsize=18)
+    ax.set_yscale("log")
+    ax.set_xlim([0.0, 1.0])
+    ax.set_ylim([1, 1e5])
+    ax.legend(loc="upper right", fontsize=15, ncol=1)
+    ax.grid(True, alpha=0.3)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Saved b-tagging ROC plot → %s", output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -244,13 +487,23 @@ def plot_comparison(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compare ROC curves: feature classifier vs token classifier."
+        description="Compare ROC curves across arbitrary classifier runs."
     )
     parser.add_argument(
-        "--results_dir",
+        "--run_dirs",
         type=Path,
+        nargs="+",
         required=True,
-        help="Parent directory containing classifier/ and feature_classifier/ subdirs.",
+        help=(
+            "Paths to run directories, each containing full_config.yaml "
+            "and checkpoints/. At least two required."
+        ),
+    )
+    parser.add_argument(
+        "--run_labels",
+        nargs="+",
+        required=True,
+        help="Human-readable label for each run (same order as --run_dirs).",
     )
     parser.add_argument(
         "--data_path",
@@ -261,14 +514,31 @@ def main() -> None:
     parser.add_argument(
         "--output_dir",
         type=Path,
-        default=None,
-        help="Where to write comparison PDFs. Defaults to {results_dir}/roc_comparison/.",
+        required=True,
+        help="Directory in which to write the PDF and CSV.",
     )
     parser.add_argument(
-        "--preprocessings",
-        nargs="+",
+        "--output_name",
+        type=str,
+        default="comparison",
+        help="Stem for output files (default: 'comparison' → comparison.pdf, comparison_auc.csv).",
+    )
+    parser.add_argument(
+        "--max_jets",
+        type=int,
+        default=0,
+        help=(
+            "Maximum number of jets to load from the HDF5 file. "
+            "The validation split will be val_frac * max_jets. "
+            "Default is 0 (load all jets). "
+            "Set to e.g. 500000 to cap memory usage (~360 MB)."
+        ),
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
         default=None,
-        help="Subset of preprocessing names to compare. Defaults to all found.",
+        help="Override dataloader batch size for inference (default: use config value).",
     )
     parser.add_argument(
         "--device",
@@ -278,76 +548,91 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    results_dir: Path = args.results_dir.resolve()
-    output_dir: Path = (args.output_dir or results_dir / "roc_comparison").resolve()
+    # ------------------------------------------------------------------
+    # Validate inputs
+    # ------------------------------------------------------------------
+    if len(args.run_dirs) != len(args.run_labels):
+        raise SystemExit(
+            f"--run_dirs ({len(args.run_dirs)}) and --run_labels "
+            f"({len(args.run_labels)}) must have the same length."
+        )
+    for d in args.run_dirs:
+        if not d.exists():
+            raise SystemExit(f"Run directory does not exist: {d}")
+
+    output_dir: Path = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    classifier_dir = results_dir / "classifier"
-    feature_classifier_dir = results_dir / "feature_classifier"
-
-    # Discover preprocessing names
-    if args.preprocessings:
-        preprocessings = args.preprocessings
-    else:
-        if not classifier_dir.exists():
-            raise SystemExit(f"classifier/ subdir not found under {results_dir}")
-        preprocessings = sorted(d.name for d in classifier_dir.iterdir() if d.is_dir())
-
-    if not preprocessings:
-        raise SystemExit("No preprocessing configurations found.")
-
-    log.info("Comparing preprocessings: %s", preprocessings)
-
+    # ------------------------------------------------------------------
     # Derive class labels from data once
+    # ------------------------------------------------------------------
     class_names = get_class_names(args.data_path)
     log.info("Class names: %s", class_names)
 
-    for preprocess in preprocessings:
-        log.info("=== %s ===", preprocess)
+    # ------------------------------------------------------------------
+    # Load configs & run inference for every run
+    # ------------------------------------------------------------------
+    results: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    n_classes: int | None = None
 
-        tok_result_dir = classifier_dir / preprocess
-        feat_result_dir = feature_classifier_dir / preprocess
+    for run_dir, run_label in zip(args.run_dirs, args.run_labels):
+        run_dir = run_dir.resolve()
+        log.info("=== %s  (%s) ===", run_label, run_dir)
 
-        tok_cfg = reload_original_config(
-            path=str(tok_result_dir),
+        cfg = reload_original_config(
+            path=str(run_dir),
             file_name="full_config.yaml",
             set_ckpt_path=True,
-            ckpt_flag="last",
+            ckpt_flag="last*",
             set_wandb_resume=False,
         )
-        feat_cfg = reload_original_config(
-            path=str(feat_result_dir),
-            file_name="full_config.yaml",
-            set_ckpt_path=True,
-            ckpt_flag="last",
-            set_wandb_resume=False,
+        if cfg is None:
+            log.warning("Skipping %s: full_config.yaml not found in %s.", run_label, run_dir)
+            continue
+        if cfg.ckpt_path is None:
+            log.warning("No checkpoint found for %s, skipping.", run_label)
+            continue
+
+        if n_classes is None:
+            n_classes = int(cfg.datamodule.n_classes)
+
+        max_jets = args.max_jets if args.max_jets > 0 else None
+        log.info("  running inference on %s ...", cfg.ckpt_path)
+        results[run_label] = run_inference(
+            cfg,
+            args.data_path,
+            args.device,
+            max_jets=max_jets,
+            batch_size=args.batch_size,
         )
-        if tok_cfg is None or feat_cfg is None:
-            log.warning(
-                "Skipping %s: full_config.yaml not found in one or both result dirs.", preprocess
-            )
-            continue
+        gc.collect()  # reclaim memory between runs
 
-        if tok_cfg.ckpt_path is None:
-            log.warning("No token classifier checkpoint found for %s, skipping.", preprocess)
-            continue
-        if feat_cfg.ckpt_path is None:
-            log.warning("No feature classifier checkpoint found for %s, skipping.", preprocess)
-            continue
-        n_classes = int(feat_cfg.datamodule.n_classes)
+    if not results or n_classes is None:
+        raise SystemExit("No valid runs loaded — nothing to plot.")
 
-        results: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    # ------------------------------------------------------------------
+    # AUC table
+    # ------------------------------------------------------------------
+    log.info("  computing AUC table ...")
+    auc_rows = compute_auc_table(results, n_classes, class_names)
+    print_auc_table(auc_rows)
 
-        log.info("  [feature] running inference on %s ...", feat_cfg.ckpt_path)
-        results["feature"] = run_inference(feat_cfg, args.data_path, args.device)
+    csv_path = output_dir / f"{args.output_name}_auc.csv"
+    save_auc_csv(auc_rows, csv_path)
 
-        log.info("  [token]   running inference on %s ...", tok_cfg.ckpt_path)
-        results["token"] = run_inference(tok_cfg, args.data_path, args.device)
+    # ------------------------------------------------------------------
+    # Plots
+    # ------------------------------------------------------------------
+    log.info("  generating plots ...")
+    # 1. Standard HEP b-tagging ROC: b-eff vs rejection for each other class
+    btag_path = output_dir / f"{args.output_name}_btag_roc.pdf"
+    plot_btag_roc(results, btag_path, n_classes, class_names)
 
-        out_pdf = output_dir / f"{preprocess}.pdf"
-        plot_comparison(preprocess, results, out_pdf, n_classes, class_names)
+    # 2. One-vs-rest ROC (original style)
+    ovr_path = output_dir / f"{args.output_name}_ovr_roc.pdf"
+    plot_comparison(results, ovr_path, n_classes, class_names)
 
-    log.info("All done. Plots written to %s", output_dir)
+    log.info("All done. Outputs written to %s", output_dir)
 
 
 if __name__ == "__main__":

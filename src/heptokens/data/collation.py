@@ -14,6 +14,8 @@ def collate_and_transform(
     do_default_collate: bool = True,
     transforms: dict | DictConfig | list | None = None,
 ) -> dict:
+    from omegaconf import ListConfig
+
     if do_default_collate:
         batch = default_collate(batch)
     if transforms is not None:
@@ -21,11 +23,19 @@ def collate_and_transform(
         if isinstance(transforms, (dict, DictConfig)):
             # Extract callable transforms from dict/DictConfig, filtering out non-callable values
             transform_list = [v for v in transforms.values() if callable(v)]
+        elif isinstance(transforms, (list, ListConfig)):
+            transform_list = list(transforms)
         else:
-            # Assume it's already a list of transforms
-            transform_list = transforms if isinstance(transforms, list) else [transforms]
+            transform_list = [transforms]
 
         for transform in transform_list:
+            if not callable(transform):
+                raise TypeError(
+                    f"collate_and_transform: expected a callable transform, got "
+                    f"{type(transform).__name__!r}: {transform!r}.  "
+                    f"Ensure all transforms are fully instantiated before being "
+                    f"passed to the dataloader."
+                )
             batch = transform(batch)
     return batch
 

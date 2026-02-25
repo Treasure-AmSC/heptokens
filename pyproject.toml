@@ -1,7 +1,7 @@
 [project]
 name = "heptokens"
 version = "0.1.0"
-authors = [{ name = "Samuel Klein", email = "samuel.byrne.klein@gmail.com" }]
+authors = [{ name = "Samuel Klein", email = "samklein@slac.stanford.edu" }, { name = "Jeffrey Krupa", email = "jkrupa@slac.stanford.edu" }]
 requires-python = ">=3.11"
 dependencies = ["torchpq>=0.3.0.6,<0.4", "snakemake>=9.13.7,<10", "snakemake-executor-plugin-slurm>=2.0.0,<3"]
 

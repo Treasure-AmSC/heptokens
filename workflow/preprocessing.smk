@@ -53,6 +53,10 @@ rule all:
             OUTPUT_DIR / "roc_comparison/{preprocess}.pdf",
             preprocess=PREPROCESS_CONFIGS.keys(),
         ),
+        expand(
+            OUTPUT_DIR / "roc_comparison/{preprocess}_auc.csv",
+            preprocess=PREPROCESS_CONFIGS.keys(),
+        ),
 
 
 rule create_preprocessor:
@@ -183,27 +187,24 @@ rule train_feature_classifier:
 rule compare_roc:
     """Compare ROC curves: feature classifier vs token classifier per preprocessing."""
     input:
-        classifier_success=expand(
-            OUTPUT_DIR / "classifier/{preprocess}/SUCCESS.txt",
-            preprocess=PREPROCESS_CONFIGS.keys(),
-        ),
-        feature_success=expand(
-            OUTPUT_DIR / "feature_classifier/{preprocess}/SUCCESS.txt",
-            preprocess=PREPROCESS_CONFIGS.keys(),
-        ),
+        classifier_success=OUTPUT_DIR / "classifier/{preprocess}/SUCCESS.txt",
+        feature_success=OUTPUT_DIR / "feature_classifier/{preprocess}/SUCCESS.txt",
     output:
-        plots=expand(
-            OUTPUT_DIR / "roc_comparison/{preprocess}.pdf",
-            preprocess=PREPROCESS_CONFIGS.keys(),
-        ),
+        plot=OUTPUT_DIR / "roc_comparison/{preprocess}.pdf",
+        auc_csv=OUTPUT_DIR / "roc_comparison/{preprocess}_auc.csv",
     params:
-        results_dir=OUTPUT_DIR,
+        token_dir=lambda wildcards: OUTPUT_DIR / "classifier" / wildcards.preprocess,
+        feature_dir=lambda wildcards: OUTPUT_DIR / "feature_classifier" / wildcards.preprocess,
         data_path=DATA_PATH,
         output_dir=OUTPUT_DIR / "roc_comparison",
+    group:
+        "single_preprocessors",
     shell:
         """
         pixi run python scripts/compare_roc.py \
-            --results_dir {params.results_dir} \
+            --run_dirs {params.token_dir} {params.feature_dir} \
+            --run_labels token feature \
             --data_path {params.data_path} \
-            --output_dir {params.output_dir}
+            --output_dir {params.output_dir} \
+            --output_name {wildcards.preprocess}
         """
