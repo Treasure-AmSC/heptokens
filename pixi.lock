@@ -1438,7 +1438,7 @@ packages:
 - pypi: ./
   name: heptokens
   version: 0.1.0
-  sha256: 46280d79c79582a3c2c09ea8a4fc8d6cdf71e5ce7dfbb403591b87e27ae3b3a0
+  sha256: fa490d9cbadd9e4d4750352ba4afa1eb5792a1e7e1896097d8c05942cc4771fe
   requires_dist:
   - torchpq>=0.3.0.6,<0.4
   - snakemake>=9.13.7,<10
