@@ -24,6 +24,12 @@ or run commands without entering a shell:
 pixi run python scripts/train.py ...
 ```
 
+To see a simple example that demonstrates the low level API take a look at```scripts/simple_demo.py```
+
+## Data
+
+The initial training datasets for this project have been taken from here: https://opendata.cern.ch/record/93940
+
 ## Repository Layout
 - `scripts/`: entry points for training, preprocessing, plotting, and profiling.
 - `configs/`: Hydra config groups for models, callbacks, datamodules, and training defaults.
