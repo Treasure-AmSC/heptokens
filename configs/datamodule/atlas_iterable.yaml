@@ -22,8 +22,8 @@ n_classes: 4
 num_workers: 3
 batch_size: 1024
 pin_memory: false
-persistent_workers: true
-multiprocessing_context: spawn
+persistent_workers: false
+multiprocessing_context: 
 # Optional transforms (instantiated separately)  TODO: improve this
 transforms:
   preprocess:
