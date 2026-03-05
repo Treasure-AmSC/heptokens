@@ -326,18 +326,13 @@ class ReconstructionMonitor(Callback):
                         weight="bold",
                     )
                 else:
-                    # Plot central quantile range to suppress extreme tails for now.
-                    # Todo: understand why extreme tails are happening. we saw residuals
-                    # -4e5 MeV. problem with the inverse transform?
-                    q_low, q_high = np.percentile(residuals, [1, 99])
-                    residuals_plot = residuals[(residuals >= q_low) & (residuals <= q_high)]
                     # Plot histogram
-                    ax.hist(residuals_plot, bins=50, histtype="step", linewidth=2)
+                    ax.hist(residuals, bins=50, histtype="step", linewidth=2)
 
                     # Add statistics text
-                    mean_val = np.mean(residuals_plot)
-                    std_val = np.std(residuals_plot)
-                    median_val = np.median(residuals_plot)
+                    mean_val = np.mean(residuals)
+                    std_val = np.std(residuals)
+                    median_val = np.median(residuals)
                     ax.text(
                         0.05,
                         0.95,
