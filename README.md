@@ -228,3 +228,6 @@ For `callbacks=encode`, reconstruction monitoring is configured in `configs/call
 - [Snakemake documentation](https://snakemake.readthedocs.io/en/stable/)
 - [Reproducible Machine Learning Workflows for Scientists, Matthew Feickert, 2025](https://carpentries-incubator.github.io/reproducible-ml-workflows/)
 - [Good ML project structure](https://github.com/mattcleigh/JetSSL-Lite/tree/master)
+
+## Contributors
+Jeffrey Krupa, Samuel Klein, Michael Kagan
