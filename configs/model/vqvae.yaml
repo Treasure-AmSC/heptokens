@@ -4,9 +4,17 @@ _target_: heptokens.models.vq_vae.LitVqVae
 encoder:
   _target_: heptokens.models.coders.Encoder
   _partial_: true
+  model:
+    _target_: heptokens.models.coders.CoderModel
+    _partial_: true
+    hidden_dims: [128, 256, 512]
 decoder:
   _target_: heptokens.models.coders.Decoder
   _partial_: true
+  model:
+    _target_: heptokens.models.coders.CoderModel
+    _partial_: true
+    hidden_dims: [128, 256, 512]
 codebook_size: 512
 codebook_dim: 6
 num_quantizers: 3

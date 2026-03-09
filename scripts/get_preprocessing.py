@@ -60,7 +60,7 @@ def get_args():
     parser.add_argument(
         "--cst_features",
         type=str,
-        default="pt,deta,dphi,d0",
+        default="pt,deta,dphi,d0,d0RelativeToBeamspot,d0Uncertainty,d0RelativeToBeamspotUncertainty,z0RelativeToBeamspot,z0RelativeToBeamspotUncertainty,z0SinTheta,z0SinThetaUncertainty,lifetimeSignedD0,lifetimeSignedD0Significance,lifetimeSignedZ0SinTheta,lifetimeSignedZ0SinThetaSignificance,theta,thetaUncertainty,qOverP,qOverPUncertainty,ptfrac",
         help="Comma-separated list of constituent features to use.",
     )
 

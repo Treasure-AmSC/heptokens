@@ -27,6 +27,8 @@ class MapDataset(Dataset):
         label_key: str = "HadronConeExclTruthLabelID",
         num_jets: int | None = None,
         num_csts: int | None = None,
+        max_jet_pt: float | None = None,
+        max_cst_pt: float | None = None,
     ) -> None:
         super().__init__()
         if jet_features is None:
@@ -63,6 +65,28 @@ class MapDataset(Dataset):
                 self.data_dict["csts"][:, :, i] = tracks_slice[key]
             # Load validity mask
             self.data_dict["mask"] = tracks_slice["valid"]
+
+        # Apply jet pT upper cut if requested
+        if max_jet_pt is not None:
+            pt_col = self.jet_features.index("pt")
+            keep = self.data_dict["jets"][:, pt_col] <= max_jet_pt
+            n_before = len(self.data_dict["jets"])
+            for key in self.data_dict:
+                self.data_dict[key] = self.data_dict[key][keep]
+            n_after = len(self.data_dict["jets"])
+            log.info(f"Removed {n_before - n_after} jets with pt > {max_jet_pt:.0f} MeV")
+
+        # Remove jets with any constituent pt above threshold
+        if max_cst_pt is not None:
+            pt_col = self.cst_features.index("pt")
+            cst_pts = self.data_dict["csts"][:, :, pt_col]
+            max_per_jet = np.where(self.data_dict["mask"], cst_pts, 0).max(axis=1)
+            keep = max_per_jet <= max_cst_pt
+            n_before = len(self.data_dict["jets"])
+            for key in self.data_dict:
+                self.data_dict[key] = self.data_dict[key][keep]
+            n_after = len(self.data_dict["jets"])
+            log.info(f"Removed {n_before - n_after} jets with constituent pt > {max_cst_pt:.0f} MeV")
 
         self.num_jets = self._get_num_jets(num_jets)
         self.num_csts = self._get_num_csts(num_csts)
