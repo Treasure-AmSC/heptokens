@@ -10,6 +10,7 @@ from torchmetrics import AUROC, Accuracy
 
 from heptokens.data.collation import VqvaeTokenizer
 from heptokens.models.transformer import Transformer
+from heptokens.models.utils import ScheduledOptimiserMixin
 
 log = logging.getLogger(__name__)
 
@@ -290,7 +291,7 @@ class FeatureEmbedder(Embedder):
         return embeddings, mask
 
 
-class JetClassifier(LightningModule):
+class JetClassifier(ScheduledOptimiserMixin, LightningModule):
     """General-purpose jet classifier with pluggable components.
 
     Architecture:
@@ -379,9 +380,6 @@ class JetClassifier(LightningModule):
         output = self.forward(batch)
         labels = batch["labels"]
         return {"output": output, "label": labels.unsqueeze(-1)}
-
-    def configure_optimizers(self):
-        return T.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
 
 
 class TokenClassifier(JetClassifier):

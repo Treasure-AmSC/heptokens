@@ -231,6 +231,7 @@ def plot_track_histograms(
     dataset_name: str,
     chunk_size: int,
     max_jets: Optional[int],
+    feature_filter: Optional[list[str]] = None,
 ) -> None:
     """Utility to plot histograms split by jet flavour."""
     ensure_output_dir(output_dir)
@@ -253,7 +254,8 @@ def plot_track_histograms(
     jet_labels = jet_labels[:slice_length]
 
     available_fields = tracks_ds.dtype.names or ()
-    feature_list = [name for name in TRACK_FEATURES if name in available_fields]
+    source_features = feature_filter if feature_filter is not None else list(TRACK_FEATURES)
+    feature_list = [name for name in source_features if name in available_fields]
     if not feature_list:
         raise ValueError("No expected track features were found in the tracks table.")
 

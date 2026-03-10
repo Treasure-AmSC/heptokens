@@ -36,6 +36,7 @@ early_stopping:
   monitor: val/total_loss
   patience: 10
   mode: min
+  verbose: true
 reconstruction_monitor:
   _target_: heptokens.callbacks.recon.ReconstructionMonitor
   cst_fn:

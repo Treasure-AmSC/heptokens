@@ -35,7 +35,7 @@ transforms:
 # Dataset-specific config (passed to MapDataset via **data_config)
 label_key: HadronConeExclTruthLabelID
 max_jet_pt: 7.0e6
-max_cst_pt: 7.0e6
+max_cst_pt: 1.0e6
 jet_features: [pt, mass, eta, phi]
 cst_features:
   - pt

@@ -10,6 +10,39 @@ from torch.optim.lr_scheduler import LambdaLR
 logger = logging.getLogger(__name__)
 
 
+class ScheduledOptimiserMixin:
+    """Mixin providing ``configure_optimizers`` via Hydra-injected partials.
+
+    Models using this mixin may accept ``optimizer`` and ``scheduler`` as
+    ``functools.partial`` objects (typically via Hydra ``_partial_: true``).
+    If no optimizer partial is provided, falls back to Adam with
+    ``self.learning_rate``.  If no scheduler partial is provided, no
+    scheduler is used.
+    """
+
+    def configure_optimizers(self):
+        hp = getattr(self, "hparams", {})
+
+        # --- optimizer ---
+        opt_partial = hp.get("optimizer", None)
+        if callable(opt_partial):
+            opt = opt_partial(self.parameters())
+        else:
+            lr = self.__dict__.get("learning_rate") or hp.get("learning_rate", 1e-3)
+            opt = T.optim.Adam(self.parameters(), lr=lr)
+
+        # --- scheduler (optional) ---
+        sched_partial = hp.get("scheduler", None)
+        if callable(sched_partial):
+            sched = sched_partial(optimizer=opt, model=self)
+            return {
+                "optimizer": opt,
+                "lr_scheduler": {"scheduler": sched, "interval": "epoch"},
+            }
+
+        return opt
+
+
 def get_max_steps(model: LightningModule) -> int:
     """Get the maximum number of steps from the model trainer."""
     try:
@@ -24,6 +57,36 @@ def get_max_steps(model: LightningModule) -> int:
         logger.info(f"Failed to get max steps from the model trainer: {e}")
         max_steps = 0
     return max_steps
+
+
+def warmup_cosine_scheduler(
+    optimizer: Optimizer,
+    warmup_epochs: int = 5,
+    min_lr: float = 1e-6,
+    model: LightningModule | None = None,
+    max_epochs: int = -1,
+) -> T.optim.lr_scheduler.SequentialLR:
+    """Linear warmup followed by cosine annealing, configured in epochs.
+
+    If ``max_epochs`` is -1 (default), it is read from ``model.trainer``.
+    """
+    if max_epochs < 1 and model is not None:
+        max_epochs = model.trainer.max_epochs
+    if max_epochs < 1:
+        raise ValueError("max_epochs must be positive (set it or pass a model with a trainer).")
+
+    warmup = min(warmup_epochs, max_epochs)
+    warmup_sched = T.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1e-2, total_iters=warmup,
+    )
+    cosine_sched = T.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(max_epochs - warmup, 1), eta_min=min_lr,
+    )
+    return T.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup_sched, cosine_sched],
+        milestones=[warmup],
+    )
 
 
 def linear_warmup_cosine_decay(

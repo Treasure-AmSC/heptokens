@@ -29,3 +29,12 @@ codebook_size: 512
 codebook_dim: 12
 num_quantizers: 5
 learning_rate: 1e-3
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 1.0e-3
+scheduler:
+  _target_: heptokens.models.utils.warmup_cosine_scheduler
+  _partial_: true
+  warmup_epochs: 5
+  min_lr: 1.0e-6
