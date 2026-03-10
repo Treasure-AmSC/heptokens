@@ -2,7 +2,7 @@
 _target_: heptokens.data.atlas_mappable.SingleFileMapModule
 
 # Data path
-data_path: /sdf/scratch/users/s/samklein/data/atlas/mc-flavtag-ttbar-small.h5
+data_path: /sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-medium.h5
 
 # Split ratios (must sum to 1.0)
 train_frac: 0.7
@@ -34,12 +34,30 @@ transforms:
       filename: /path/to/jet_quantiles.joblib
 # Dataset-specific config (passed to MapDataset via **data_config)
 label_key: HadronConeExclTruthLabelID
+max_jet_pt: 7.0e6
+max_cst_pt: 7.0e6
 jet_features: [pt, mass, eta, phi]
 cst_features:
   - pt
   - deta
   - dphi
   - d0
+  - d0RelativeToBeamspot
+  - d0Uncertainty
+  - d0RelativeToBeamspotUncertainty
+  - z0RelativeToBeamspot
+  - z0RelativeToBeamspotUncertainty
+  - z0SinTheta
+  - z0SinThetaUncertainty
+  - lifetimeSignedD0 
+  - lifetimeSignedD0Significance
+  - lifetimeSignedZ0SinTheta
+  - lifetimeSignedZ0SinThetaSignificance
+  - theta
+  - thetaUncertainty
+  - qOverP
+  - qOverPUncertainty
+  - ptfrac
 # Optional limits
 num_jets:  # Use all jets
 num_csts: 40  # Use all constituents per jet

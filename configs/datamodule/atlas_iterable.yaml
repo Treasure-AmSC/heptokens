@@ -2,7 +2,7 @@
 _target_: heptokens.data.atlas_iterable.SingleFileIterModule
 
 # Data path
-data_path: /sdf/scratch/users/s/samklein/data/atlas/mc-flavtag-ttbar-small.h5
+data_path: /sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-medium.h5
 
 # Split ratios (must sum to 1.0)
 train_frac: 0.7
@@ -43,5 +43,21 @@ cst_features:
   - deta
   - dphi
   - d0
+  - d0RelativeToBeamspot
+  - d0Uncertainty
+  - d0RelativeToBeamspotUncertainty
+  - z0RelativeToBeamspot
+  - z0RelativeToBeamspotUncertainty
+  - z0SinTheta
+  - z0SinThetaUncertainty
+  - lifetimeSignedD0 
+  - lifetimeSignedD0Significance
+  - lifetimeSignedZ0SinTheta
+  - lifetimeSignedZ0SinThetaSignificance
+  - theta
+  - thetaUncertainty
+  - qOverP
+  - qOverPUncertainty
+  - ptfrac
 # Optional limits
 num_csts: 40  # Use all constituents per jet
