@@ -8,11 +8,12 @@ from lightning import LightningModule
 from vector_quantize_pytorch import ResidualVQ
 
 from heptokens.models.coders import Decoder, Encoder
+from heptokens.models.utils import ScheduledOptimiserMixin
 
 log = logging.getLogger(__name__)
 
 
-class LitVqVae(LightningModule):
+class LitVqVae(ScheduledOptimiserMixin, LightningModule):
     """Lightning Module wrapper for VQ-VAE with ResidualVQ.
 
     Args:
@@ -39,6 +40,8 @@ class LitVqVae(LightningModule):
         commitment_weight: float = 1.0,
         learning_rate: float = 1e-3,
         reconstruction_weight: float = 1.0,
+        optimizer=None,
+        scheduler=None,
         data_sample: torch.Tensor = None,
         **kwargs,
     ):
@@ -186,7 +189,3 @@ class LitVqVae(LightningModule):
     def predict_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Predict step returns indices."""
         return self(batch)
-
-    def configure_optimizers(self):
-        """Configure Adam optimizer."""
-        return torch.optim.Adam(self.parameters(), lr=self.learning_rate)

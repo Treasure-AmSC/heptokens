@@ -58,6 +58,10 @@ class ReconstructionMonitor(Callback):
         self.iqr_med_n_bins = iqr_med_n_bins
         self.iqr_med_min_entries_per_bin = iqr_med_min_entries_per_bin
 
+        # Store constituent features across batches for epoch-level plots
+        self.cst_originals = []
+        self.cst_recons = []
+
         if compute_jet_metrics:
             # Store jet metrics across batches for epoch-level summary
             self.jet_residuals = []
@@ -168,6 +172,10 @@ class ReconstructionMonitor(Callback):
         pl_module.log("val/unscaled_mae", unscaled_mae, prog_bar=False)
         pl_module.log("val/unscaled_mse", unscaled_mse, prog_bar=False)
 
+        # Store constituent features for epoch-level scatter plots
+        self.cst_originals.append(original_csts.cpu().numpy())
+        self.cst_recons.append(recon_csts.cpu().numpy())
+
         # Jet-level metrics (pt-based only, since coordinates are relative)
         if self.compute_jet_metrics:
             # Compute jets from original and reconstructed constituents
@@ -240,34 +248,50 @@ class ReconstructionMonitor(Callback):
                 "val/constituent_radial_dist", float(np.mean(radial_distance)), prog_bar=False
             )
 
-        # Feature plots (existing code)
-        if trainer.logger is not None and hasattr(trainer.logger, "experiment"):
-            import matplotlib.pyplot as plt
-            import wandb
 
-            logger = trainer.logger.experiment
-
-            for feature_idx in range(original_csts.shape[1]):
-                original_feat = original_csts[:, feature_idx].cpu().numpy()
-                recon_feat = recon_csts[:, feature_idx].cpu().numpy()
-
-                fig, ax = plt.subplots(figsize=(6, 6))
-                ax.scatter(original_feat, recon_feat, alpha=0.5, s=1)
-                ax.set_xlabel("Original Feature")
-                ax.set_ylabel("Reconstructed Feature")
-                ax.set_title(f"Feature {feature_idx}")
-                ax.plot(
-                    [original_feat.min(), original_feat.max()],
-                    [original_feat.min(), original_feat.max()],
-                    "r--",
-                )
-
-                logger.log({f"val/recon_feature_{feature_idx}": wandb.Image(fig)})
-                plt.close(fig)
 
     # Add method to plot jet residuals at end of validation epoch
     def on_validation_epoch_end(self, trainer, pl_module):
-        """Create summary plots of jet reconstruction at end of epoch."""
+        """Create summary plots at end of epoch."""
+        # Feature scatter plots from accumulated batches
+        if self.cst_originals and trainer.logger is not None and hasattr(trainer.logger, "experiment"):
+            import matplotlib.pyplot as plt
+            import wandb
+
+            all_original = np.concatenate(self.cst_originals, axis=0)
+            all_recon = np.concatenate(self.cst_recons, axis=0)
+            self.cst_originals.clear()
+            self.cst_recons.clear()
+
+            n_features = all_original.shape[1]
+            n_cols = min(4, n_features)
+            n_rows = int(np.ceil(n_features / n_cols))
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4.5 * n_rows))
+            axes = np.atleast_1d(axes).flatten()
+
+            for feature_idx in range(n_features):
+                ax = axes[feature_idx]
+                orig = all_original[:, feature_idx]
+                reco = all_recon[:, feature_idx]
+                ax.scatter(orig, reco, alpha=0.3, s=1)
+                ax.set_xlabel("Original")
+                ax.set_ylabel("Reconstructed")
+                ax.set_title(f"Feature {feature_idx}")
+                ax.plot(
+                    [orig.min(), orig.max()],
+                    [orig.min(), orig.max()],
+                    "r--",
+                )
+
+            for i in range(n_features, len(axes)):
+                axes[i].axis("off")
+
+            fig.tight_layout()
+            trainer.logger.experiment.log(
+                {"val/recon_features": wandb.Image(fig), "epoch": trainer.current_epoch}
+            )
+            plt.close(fig)
+
         if not self.compute_jet_metrics or not self.jet_residuals:
             return
 

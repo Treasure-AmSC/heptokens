@@ -332,6 +332,12 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated constituent features expected by --cst-transformer.",
     )
     parser.add_argument(
+        "--track-features",
+        type=str,
+        default=None,
+        help="Comma-separated raw track features to plot (default: all from TRACK_FEATURES).",
+    )
+    parser.add_argument(
         "--jet-transformed-output-dir",
         type=Path,
         default=None,
@@ -355,6 +361,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional limit on jets used for transformed constituent histograms.",
     )
+    parser.add_argument(
+        "--skip-jet-histograms",
+        action="store_true",
+        help="Skip raw jet feature histograms.",
+    )
+    parser.add_argument(
+        "--skip-raw-track-histograms",
+        action="store_true",
+        help="Skip raw track feature histograms.",
+    )
     return parser.parse_args()
 
 
@@ -362,7 +378,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     args = parse_args()
     jets_df = load_jets_table(args.input)
-    make_histograms(jets_df, args.output_dir, args.bins, args.density, args.dpi, args.dataset_name)
+    if not args.skip_jet_histograms:
+        make_histograms(jets_df, args.output_dir, args.bins, args.density, args.dpi, args.dataset_name)
 
     if args.jet_transformer is not None:
         jet_transformed_output_dir = args.jet_transformed_output_dir
@@ -387,17 +404,20 @@ def main() -> None:
         tracks_ds = handle["tracks"]
 
         # Plot raw track histograms
-        plot_track_histograms(
-            tracks_ds,
-            jet_labels,
-            args.track_output_dir,
-            args.bins,
-            args.density,
-            args.dpi,
-            args.dataset_name,
-            args.track_chunk_size,
-            args.track_max_jets,
-        )
+        if not args.skip_raw_track_histograms:
+            track_feature_filter = _parse_feature_list(args.track_features) if args.track_features else None
+            plot_track_histograms(
+                tracks_ds,
+                jet_labels,
+                args.track_output_dir,
+                args.bins,
+                args.density,
+                args.dpi,
+                args.dataset_name,
+                args.track_chunk_size,
+                args.track_max_jets,
+                feature_filter=track_feature_filter,
+            )
 
         if args.cst_transformer is not None:
             cst_transformed_output_dir = args.cst_transformed_output_dir
