@@ -11,7 +11,7 @@ from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, random_split
 
 from heptokens.data.collation import collate_and_transform
-from heptokens.utils.plot_physics import JET_FEATURES, TRACK_FEATURES, load_jets_table
+from heptokens.utils.plot_physics import JET_FEATURES, TRACK_FEATURES
 
 log = logging.getLogger(__name__)
 
@@ -40,31 +40,38 @@ class MapDataset(Dataset):
 
         # Load data from HDF5 file
         self.data_dict = {}
-        # Load jet-level data from the jets table
-        jets_table = load_jets_table(file_path)
-        self.data_dict["jets"] = jets_table[self.jet_features].to_numpy()[:num_jets]
-        # Set the truth labels as targets
-        labels = jets_table[label_key].to_numpy()[:num_jets]
-        # Convert labels based on unique values to a contiguous range starting at 0
+        # Load only needed jet-level columns directly from HDF5
+        with h5py.File(file_path, mode="r") as handle:
+            jets_ds = handle["jets"]
+            n_load = min(num_jets, jets_ds.shape[0]) if num_jets else jets_ds.shape[0]
+
+            # Read only the columns we need
+            self.data_dict["jets"] = np.column_stack(
+                [jets_ds[feat][:n_load].astype(np.float32) for feat in self.jet_features]
+            )
+            labels = jets_ds[label_key][:n_load]
+
+        # Convert labels to contiguous range starting at 0
         # TODO: is this the correct thing to do?
         unique_labels = np.unique(labels)
         label_map = {label: i for i, label in enumerate(unique_labels)}
-        self.data_dict["labels"] = np.array([label_map[label] for label in labels])
-        # Load constituent-level data from the tracks table
+        self.data_dict["labels"] = np.array([label_map[int(label)] for label in labels])
+
+        # Load only needed constituent-level columns directly from HDF5
         with h5py.File(file_path, mode="r") as handle:
             tracks_ds = handle["tracks"]
-            # Load the slice once
-            tracks_slice = tracks_ds[:num_jets, :num_csts]
+            n_load = min(num_jets, tracks_ds.shape[0]) if num_jets else tracks_ds.shape[0]
+            n_csts = min(num_csts, tracks_ds.shape[1]) if num_csts else tracks_ds.shape[1]
+
             # Pre-allocate and fill constituent features array
             num_features = len(cst_features)
             self.data_dict["csts"] = np.empty(
-                (tracks_slice.shape[0], tracks_slice.shape[1], num_features), dtype=np.float32
+                (n_load, n_csts, num_features), dtype=np.float32
             )
-            # Fill constituent features
             for i, key in enumerate(cst_features):
-                self.data_dict["csts"][:, :, i] = tracks_slice[key]
+                self.data_dict["csts"][:, :, i] = tracks_ds[key][:n_load, :n_csts]
             # Load validity mask
-            self.data_dict["mask"] = tracks_slice["valid"]
+            self.data_dict["mask"] = tracks_ds["valid"][:n_load, :n_csts]
 
         # Apply jet pT upper cut if requested
         if max_jet_pt is not None:

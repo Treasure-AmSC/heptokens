@@ -214,6 +214,30 @@ class ReconstructionMonitor(Callback):
             eta_residuals = jet_truth["eta"] - jet_reco["eta"]
             phi_residuals = self._delta_phi(jet_truth["phi"], jet_reco["phi"])
 
+            # Relative residuals: (truth - reco) / truth
+            # Use a floor on |truth| to avoid division by zero
+            _floor = 1e-3
+            pt_rel_residuals = np.divide(
+                pt_residuals, jet_truth["pt"],
+                out=np.full_like(pt_residuals, np.nan),
+                where=np.abs(jet_truth["pt"]) > _floor,
+            )
+            mass_rel_residuals = np.divide(
+                mass_residuals, jet_truth["mass"],
+                out=np.full_like(mass_residuals, np.nan),
+                where=np.abs(jet_truth["mass"]) > _floor,
+            )
+            eta_rel_residuals = np.divide(
+                eta_residuals, jet_truth["eta"],
+                out=np.full_like(eta_residuals, np.nan),
+                where=np.abs(jet_truth["eta"]) > _floor,
+            )
+            phi_rel_residuals = np.divide(
+                phi_residuals, jet_truth["phi"],
+                out=np.full_like(phi_residuals, np.nan),
+                where=np.abs(jet_truth["phi"]) > _floor,
+            )
+
             # Compute mean radial distance in (deta, dphi) space
             mask_np = mask.cpu().numpy()
             original_valid = original_unscaled["csts"][mask_np]
@@ -232,6 +256,10 @@ class ReconstructionMonitor(Callback):
                 "mass": mass_residuals,
                 "eta": eta_residuals,
                 "phi": phi_residuals,
+                "pt_rel": pt_rel_residuals,
+                "mass_rel": mass_rel_residuals,
+                "eta_rel": eta_rel_residuals,
+                "phi_rel": phi_rel_residuals,
                 "radial_dist": radial_distance,
                 "truth_pt": jet_truth["pt"],
                 "pt_ratio": pt_ratio,
@@ -313,12 +341,16 @@ class ReconstructionMonitor(Callback):
             plt.style.use(hep.style.CMS)
 
             # Create residual plots
-            plot_order = ["pt", "mass", "eta", "phi", "radial_dist", "truth_pt", "reco_pt"]
+            plot_order = ["pt", "mass", "eta", "phi", "pt_rel", "mass_rel", "eta_rel", "phi_rel", "radial_dist", "truth_pt", "reco_pt"]
             labels = {
                 "pt": "Jet pt residual (truth - reco)",
                 "mass": "Jet mass residual (truth - reco)",
                 "eta": "Jet eta residual (truth - reco)",
                 "phi": "Jet phi residual (truth - reco)",
+                "pt_rel": "Jet pt relative residual (truth - reco) / truth",
+                "mass_rel": "Jet mass relative residual (truth - reco) / truth",
+                "eta_rel": "Jet eta relative residual (truth - reco) / truth",
+                "phi_rel": "Jet phi relative residual (truth - reco) / truth",
                 "radial_dist": "Constituent radial distance",
                 "truth_pt": "Truth jet pt [MeV]",
                 "reco_pt": "Reconstructed jet pt [MeV]",
@@ -335,13 +367,15 @@ class ReconstructionMonitor(Callback):
                 label = labels.get(var, var)
                 residuals = all_residuals[var]
 
-                # Plot histogram
-                if np.sum(~np.isfinite(residuals)) != 0:
-                    # Plot warning message
+                # Plot histogram (filter non-finite values)
+                residuals = all_residuals[var]
+                finite = residuals[np.isfinite(residuals)]
+
+                if finite.size == 0:
                     ax.text(
                         0.5,
                         0.5,
-                        f"Non-finite values in {var} residuals",
+                        f"No finite values in {var}",
                         ha="center",
                         va="center",
                         fontsize=14,
@@ -350,17 +384,20 @@ class ReconstructionMonitor(Callback):
                         weight="bold",
                     )
                 else:
-                    # Plot histogram
-                    ax.hist(residuals, bins=50, histtype="step", linewidth=2)
+                    n_nan = residuals.size - finite.size
+                    ax.hist(finite, bins=50, histtype="step", linewidth=2)
 
                     # Add statistics text
-                    mean_val = np.mean(residuals)
-                    std_val = np.std(residuals)
-                    median_val = np.median(residuals)
+                    mean_val = np.mean(finite)
+                    std_val = np.std(finite)
+                    median_val = np.median(finite)
+                    stats = f"Mean: {mean_val:.3f}\nMedian: {median_val:.3f}\nStd: {std_val:.3f}"
+                    if n_nan > 0:
+                        stats += f"\nNaN: {n_nan}"
                     ax.text(
                         0.05,
                         0.95,
-                        f"Mean: {mean_val:.3f}\nMedian: {median_val:.3f}\nStd: {std_val:.3f}",
+                        stats,
                         transform=ax.transAxes,
                         verticalalignment="top",
                         bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
