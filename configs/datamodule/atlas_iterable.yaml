@@ -60,4 +60,6 @@ cst_features:
   - qOverPUncertainty
   - ptfrac
 # Optional limits
+max_jet_pt: 7.0e6
+max_cst_pt: 1.0e6
 num_csts: 40  # Use all constituents per jet

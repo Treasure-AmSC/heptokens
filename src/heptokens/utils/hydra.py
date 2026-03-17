@@ -195,7 +195,7 @@ def instantiate_collection(cfg_coll: DictConfig) -> list[Any]:
     return objs
 
 
-def save_declaration():
+def save_declaration(filename: str = "SUCCESS.txt"):
     # Save text file saying experiment is done
-    with open("SUCCESS.txt", "w") as f:
+    with open(filename, "w") as f:
         f.write("The experiment has completed successfully.\n")
