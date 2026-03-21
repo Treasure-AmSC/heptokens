@@ -44,8 +44,35 @@ JET_RESIDUAL_LABELS = {
     "radial_dist": r"Constituent radial distance",
 }
 
-# Constituent feature indices (matching default cst ordering: pt, deta, dphi, ...)
-CST_FEATURE_NAMES = ["pt", "deta", "dphi"]
+# Constituent feature indices (matching default cst ordering from atlas_iterable.yaml)
+CST_FEATURE_NAMES = [
+    r"$p_T$", r"$\Delta\eta$", r"$\Delta\phi$",
+    r"$d_0$", r"$d_0$ (beamspot)", r"$\sigma(d_0)$", r"$\sigma(d_0^{\mathrm{BS}})$",
+    r"$z_0^{\mathrm{BS}}$", r"$\sigma(z_0^{\mathrm{BS}})$",
+    r"$z_0 \sin\theta$", r"$\sigma(z_0 \sin\theta)$",
+    r"signed $d_0$", r"signed $d_0$ signif.",
+    r"signed $z_0 \sin\theta$", r"signed $z_0 \sin\theta$ signif.",
+    r"$\theta$", r"$\sigma(\theta)$",
+    r"$q/p$", r"$\sigma(q/p)$",
+    r"$p_T$ frac",
+]
+
+# Line styles to cycle through when the color palette repeats
+_LINESTYLES = ["-", "--", "-.", ":"]
+
+
+def _style_cycle(n: int) -> list[tuple[str, str]]:
+    """Return (color, linestyle) pairs for *n* runs, cycling linestyles on color repeats."""
+    prop_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    if not prop_cycle:
+        prop_cycle = [f"C{i}" for i in range(10)]
+    n_colors = len(prop_cycle)
+    styles = []
+    for i in range(n):
+        color = prop_cycle[i % n_colors]
+        ls = _LINESTYLES[(i // n_colors) % len(_LINESTYLES)]
+        styles.append((color, ls))
+    return styles
 
 
 def load_metrics(run_dir: Path) -> dict[str, np.ndarray]:
@@ -71,6 +98,8 @@ def plot_jet_residuals(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(7 * n_cols, 5 * n_rows))
     axes = np.atleast_1d(axes).flatten()
 
+    styles = _style_cycle(len(all_metrics))
+
     for i, key in enumerate(keys):
         ax = axes[i]
         # Compute shared bin edges from all runs
@@ -79,9 +108,9 @@ def plot_jet_residuals(
         lo, hi = np.percentile(combined, [1, 99])
         bins = np.linspace(lo, hi, 51)
 
-        for vals, label in zip(all_vals, labels):
+        for vals, label, (color, ls) in zip(all_vals, labels, styles):
             ax.hist(vals, bins=bins, histtype="step", linewidth=1.5,
-                    label=label, density=True)
+                    label=label, density=True, color=color, linestyle=ls)
 
         ax.set_xlabel(JET_RESIDUAL_LABELS.get(key, key), fontsize=12)
         ax.set_ylabel("Density", fontsize=12)
@@ -108,6 +137,7 @@ def plot_cst_features(
         return
 
     plt.style.use(hep.style.CMS)
+    styles = _style_cycle(len(all_metrics))
 
     n_features = all_metrics[0]["cst_original"].shape[1]
     n_cols = min(4, n_features)
@@ -129,9 +159,9 @@ def plot_cst_features(
         lo, hi = np.percentile(combined, [1, 99])
         bins = np.linspace(lo, hi, 51)
 
-        for res, label in zip(all_residuals, labels):
+        for res, label, (color, ls) in zip(all_residuals, labels, styles):
             ax.hist(res, bins=bins, histtype="step", linewidth=1.5,
-                    label=label, density=True)
+                    label=label, density=True, color=color, linestyle=ls)
 
         ax.set_xlabel(f"{feat_name} residual (orig $-$ reco)", fontsize=12)
         ax.set_ylabel("Density", fontsize=12)
@@ -161,11 +191,12 @@ def plot_iqr_vs_pt(
         return
 
     plt.style.use(hep.style.CMS)
+    styles = _style_cycle(len(all_metrics))
     fig, ax = plt.subplots(figsize=(7, 6))
     bin_edges = np.linspace(pt_min, pt_max, n_bins + 1)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
-    for metrics, label in zip(all_metrics, labels):
+    for metrics, label, (color, ls) in zip(all_metrics, labels, styles):
         truth_pt = metrics["truth_pt"].ravel()
         pt_ratio = metrics["pt_ratio"].ravel()
         valid = np.isfinite(truth_pt) & np.isfinite(pt_ratio) & (pt_ratio > 0)
@@ -186,7 +217,8 @@ def plot_iqr_vs_pt(
 
         ok = np.isfinite(iqr_med)
         if np.any(ok):
-            ax.plot(bin_centers[ok], iqr_med[ok], marker="o", linewidth=1.5, label=label)
+            ax.plot(bin_centers[ok], iqr_med[ok], marker="o", linewidth=1.5,
+                   label=label, color=color, linestyle=ls)
 
     ax.set_xlabel(r"Truth jet $p_T$ [MeV]", fontsize=12)
     ax.set_ylabel(r"IQR / median of $p_T^{\mathrm{reco}} / p_T^{\mathrm{truth}}$", fontsize=12)
