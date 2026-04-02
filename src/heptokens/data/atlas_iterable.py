@@ -26,6 +26,8 @@ class IterMapDataset(IterableDataset):
         label_key: str = "HadronConeExclTruthLabelID",
         num_jets: int | None = None,
         num_csts: int | None = None,
+        max_jet_pt: float | None = None,
+        max_cst_pt: float | None = None,
         chunk_size: int = 1000,
     ) -> None:
         super().__init__()
@@ -40,6 +42,10 @@ class IterMapDataset(IterableDataset):
         self.label_key = label_key
         self.num_csts = num_csts
         self.chunk_size = chunk_size
+        self.max_jet_pt = max_jet_pt
+        self.max_cst_pt = max_cst_pt
+        self.pt_idx = jet_features.index("pt") if "pt" in jet_features else None
+        self.cst_pt_idx = cst_features.index("pt") if "pt" in cst_features else None
 
         # Determine total number of jets and build label map
         with h5py.File(file_path, mode="r") as handle:
@@ -112,8 +118,20 @@ class IterMapDataset(IterableDataset):
                 # Load validity mask for this chunk
                 mask_chunk = tracks_chunk["valid"]
 
+                # Apply jet pT cut
+                keep = np.ones(chunk_end - chunk_start, dtype=bool)
+                if self.max_jet_pt is not None and self.pt_idx is not None:
+                    keep &= jets_chunk[:, self.pt_idx] <= self.max_jet_pt
+                # Apply constituent pT cut
+                if self.max_cst_pt is not None and self.cst_pt_idx is not None:
+                    cst_pts = csts_chunk[:, :, self.cst_pt_idx]
+                    max_per_jet = np.where(mask_chunk, cst_pts, 0).max(axis=1)
+                    keep &= max_per_jet <= self.max_cst_pt
+
                 # Yield individual samples from this chunk
                 for i in range(chunk_end - chunk_start):
+                    if not keep[i]:
+                        continue
                     yield {
                         "jets": jets_chunk[i],
                         "csts": csts_chunk[i],
@@ -286,6 +304,8 @@ class IndexedIterMapDataset(IterableDataset):
         cst_features: list | None = None,
         label_key: str = "HadronConeExclTruthLabelID",
         num_csts: int | None = None,
+        max_jet_pt: float | None = None,
+        max_cst_pt: float | None = None,
         chunk_size: int = 1000,
     ) -> None:
         super().__init__()
@@ -300,6 +320,10 @@ class IndexedIterMapDataset(IterableDataset):
         self.cst_features = cst_features
         self.label_key = label_key
         self.chunk_size = chunk_size
+        self.max_jet_pt = max_jet_pt
+        self.max_cst_pt = max_cst_pt
+        self.pt_idx = jet_features.index("pt") if "pt" in jet_features else None
+        self.cst_pt_idx = cst_features.index("pt") if "pt" in cst_features else None
 
         # Build label map from all indices
         with h5py.File(file_path, mode="r") as handle:
@@ -370,8 +394,20 @@ class IndexedIterMapDataset(IterableDataset):
                 # Load validity mask
                 mask_chunk = tracks_chunk["valid"]
 
+                # Apply jet pT cut
+                keep = np.ones(len(chunk_indices), dtype=bool)
+                if self.max_jet_pt is not None and self.pt_idx is not None:
+                    keep &= jets_chunk[:, self.pt_idx] <= self.max_jet_pt
+                # Apply constituent pT cut
+                if self.max_cst_pt is not None and self.cst_pt_idx is not None:
+                    cst_pts = csts_chunk[:, :, self.cst_pt_idx]
+                    max_per_jet = np.where(mask_chunk, cst_pts, 0).max(axis=1)
+                    keep &= max_per_jet <= self.max_cst_pt
+
                 # Yield individual samples
                 for i in range(len(chunk_indices)):
+                    if not keep[i]:
+                        continue
                     yield {
                         "jets": jets_chunk[i],
                         "csts": csts_chunk[i],

@@ -2,6 +2,7 @@
 
 import logging
 import warnings
+from pathlib import Path
 
 import hydra
 import lightning.pytorch as pl
@@ -75,13 +76,24 @@ def main(cfg: DictConfig) -> None:
     log.info("Saving config so job can be resumed")
     save_config(cfg)
 
-    log.info("Starting training!")
-    trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.ckpt_path)
+    if cfg.get("test_only", False):
+        log.info("Running test-only evaluation via validate on test data")
+        # Enable saving metrics to disk on the reconstruction monitor
+        for cb in trainer.callbacks:
+            if hasattr(cb, "save_metrics"):
+                cb.save_metrics = True
+        datamodule.setup(stage="test")
+        trainer.validate(model, dataloaders=datamodule.test_dataloader(), ckpt_path=cfg.ckpt_path)
+        # Write marker in parent dir (training run dir, not test subdir)
+        save_declaration(filename=str(Path("..") / "TEST_SUCCESS.txt"))
+    else:
+        log.info("Starting training!")
+        trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.ckpt_path)
 
-    log.info("Checking if training finished correctly")
-    if trainer.state.status == "finished":
-        log.info(" -- YES!! -- ")
-        save_declaration()
+        log.info("Checking if training finished correctly")
+        if trainer.state.status == "finished":
+            log.info(" -- YES!! -- ")
+            save_declaration()
 
 
 if __name__ == "__main__":

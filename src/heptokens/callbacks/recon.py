@@ -1,5 +1,6 @@
 # A callback to monitor reconstruction quality in original (unscaled) space.
 import logging
+from pathlib import Path
 
 import numpy as np
 import torch as T
@@ -57,6 +58,7 @@ class ReconstructionMonitor(Callback):
         self.iqr_med_pt_max = iqr_med_pt_max
         self.iqr_med_n_bins = iqr_med_n_bins
         self.iqr_med_min_entries_per_bin = iqr_med_min_entries_per_bin
+        self.save_metrics = False  # Set True externally to save metrics to disk
 
         # Store constituent features across batches for epoch-level plots
         self.cst_originals = []
@@ -132,12 +134,8 @@ class ReconstructionMonitor(Callback):
         dphi = phi1 - phi2
         return np.arctan2(np.sin(dphi), np.cos(dphi))
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        """Compute metrics in original space during validation."""
-        if trainer.sanity_checking:
-            return
-        if trainer.current_epoch % self.log_every_n_epochs != 0:
-            return
+    def _on_batch_end(self, trainer, pl_module, batch, batch_idx, stage="val"):
+        """Shared logic for computing metrics in original space."""
         if batch_idx >= self.max_batches:
             return
 
@@ -169,8 +167,8 @@ class ReconstructionMonitor(Callback):
         unscaled_mae = T.mean(T.abs(original_csts - recon_csts))
         unscaled_mse = T.mean((original_csts - recon_csts) ** 2)
 
-        pl_module.log("val/unscaled_mae", unscaled_mae, prog_bar=False)
-        pl_module.log("val/unscaled_mse", unscaled_mse, prog_bar=False)
+        pl_module.log(f"{stage}/unscaled_mae", unscaled_mae, prog_bar=False)
+        pl_module.log(f"{stage}/unscaled_mse", unscaled_mse, prog_bar=False)
 
         # Store constituent features for epoch-level scatter plots
         self.cst_originals.append(original_csts.cpu().numpy())
@@ -270,26 +268,57 @@ class ReconstructionMonitor(Callback):
             self.jet_residuals.append(residuals)
 
             # Log immediate metrics
-            pl_module.log("val/jet_pt_bias", float(np.mean(pt_residuals)), prog_bar=False)
-            pl_module.log("val/jet_pt_resolution", float(np.std(pt_residuals)), prog_bar=False)
+            pl_module.log(f"{stage}/jet_pt_bias", float(np.mean(pt_residuals)), prog_bar=False)
+            pl_module.log(f"{stage}/jet_pt_resolution", float(np.std(pt_residuals)), prog_bar=False)
             pl_module.log(
-                "val/constituent_radial_dist", float(np.mean(radial_distance)), prog_bar=False
+                f"{stage}/constituent_radial_dist", float(np.mean(radial_distance)), prog_bar=False
             )
 
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        """Compute metrics in original space during validation."""
+        if trainer.sanity_checking:
+            return
+        if trainer.current_epoch % self.log_every_n_epochs != 0:
+            return
+        self._on_batch_end(trainer, pl_module, batch, batch_idx, stage="val")
 
-
-    # Add method to plot jet residuals at end of validation epoch
-    def on_validation_epoch_end(self, trainer, pl_module):
-        """Create summary plots at end of epoch."""
+    def _on_epoch_end(self, trainer, pl_module, stage="val"):
+        """Shared logic for creating summary plots at end of epoch."""
         # Feature scatter plots from accumulated batches
-        if self.cst_originals and trainer.logger is not None and hasattr(trainer.logger, "experiment"):
-            import matplotlib.pyplot as plt
-            import wandb
-
+        all_original = None
+        all_recon = None
+        if self.cst_originals:
             all_original = np.concatenate(self.cst_originals, axis=0)
             all_recon = np.concatenate(self.cst_recons, axis=0)
             self.cst_originals.clear()
             self.cst_recons.clear()
+
+        all_residuals = None
+        if self.compute_jet_metrics and self.jet_residuals:
+            all_residuals = {
+                key: np.concatenate([batch[key] for batch in self.jet_residuals])
+                for key in self.jet_residuals[0].keys()
+            }
+            self.jet_residuals.clear()
+
+        # Save raw metrics to disk when enabled
+        if self.save_metrics:
+            output_dir = Path(trainer.default_root_dir) / "test_metrics"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            save_dict = {}
+            if all_original is not None:
+                save_dict["cst_original"] = all_original
+                save_dict["cst_recon"] = all_recon
+            if all_residuals is not None:
+                save_dict.update(all_residuals)
+            if save_dict:
+                np.savez(output_dir / "test_metrics.npz", **save_dict)
+                log.info(f"Saved test metrics to {output_dir / 'test_metrics.npz'}")
+
+        # Plot constituent scatter plots
+        if all_original is not None and trainer.logger is not None and hasattr(trainer.logger, "experiment"):
+            import matplotlib.pyplot as plt
+            import wandb
 
             n_features = all_original.shape[1]
             n_cols = min(4, n_features)
@@ -316,21 +345,12 @@ class ReconstructionMonitor(Callback):
 
             fig.tight_layout()
             trainer.logger.experiment.log(
-                {"val/recon_features": wandb.Image(fig), "epoch": trainer.current_epoch}
+                {f"{stage}/recon_features": wandb.Image(fig), "epoch": trainer.current_epoch}
             )
             plt.close(fig)
 
-        if not self.compute_jet_metrics or not self.jet_residuals:
+        if all_residuals is None:
             return
-
-        # Concatenate all batch residuals
-        all_residuals = {
-            key: np.concatenate([batch[key] for batch in self.jet_residuals])
-            for key in self.jet_residuals[0].keys()
-        }
-
-        # Clear for next epoch
-        self.jet_residuals.clear()
 
         if trainer.logger is not None and hasattr(trainer.logger, "experiment"):
             import matplotlib.pyplot as plt
@@ -412,7 +432,7 @@ class ReconstructionMonitor(Callback):
 
             fig.tight_layout()
             trainer.logger.experiment.log(
-                {"val/jet_residuals": wandb.Image(fig), "epoch": trainer.current_epoch}
+                {f"{stage}/jet_residuals": wandb.Image(fig), "epoch": trainer.current_epoch}
             )
             plt.close(fig)
 
@@ -487,8 +507,14 @@ class ReconstructionMonitor(Callback):
             fig.tight_layout()
             trainer.logger.experiment.log(
                 {
-                    "val/jet_pt_response_iqr_over_median_vs_truth_pt": wandb.Image(fig),
+                    f"{stage}/jet_pt_response_iqr_over_median_vs_truth_pt": wandb.Image(fig),
                     "epoch": trainer.current_epoch,
                 }
             )
             plt.close(fig)
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        """Create summary plots at end of validation epoch."""
+        self._on_epoch_end(trainer, pl_module, stage="val")
+
+
