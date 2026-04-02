@@ -92,7 +92,7 @@ def preprocess_batch(
     )
 
     if feat_diff > 0:
-        csts_np = csts_np[:, :-feat_diff]
+        csts_np = csts_np[..., :-feat_diff]
 
     # Convert back to tensor
     jet_dict["csts"] = T.from_numpy(csts_np).float()
@@ -124,7 +124,13 @@ def inverse_preprocess_batch(
     # Only transform valid (masked) constituents
     if mask.any():
         valid_csts = csts[mask].cpu().numpy()
+        feat_diff = cst_fn.n_features_in_ - valid_csts.shape[-1]
+        if feat_diff > 0:
+            zeros = np.zeros((valid_csts.shape[0], feat_diff), dtype=valid_csts.dtype)
+            valid_csts = np.concatenate((valid_csts, zeros), axis=-1)
         inverse_csts = cst_fn.inverse_transform(valid_csts)
+        if feat_diff > 0:
+            inverse_csts = inverse_csts[:, :-feat_diff]
         csts[mask] = T.from_numpy(inverse_csts).float()
 
     # Inverse transform jets
