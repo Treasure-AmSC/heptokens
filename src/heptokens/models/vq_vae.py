@@ -50,6 +50,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
 
         self.learning_rate = learning_rate
         self.reconstruction_weight = reconstruction_weight
+        self.codebook_size = codebook_size
 
         # Infer input dimension from data_sample if provided
         if data_sample is not None:
@@ -148,20 +149,29 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("train/recon_loss", recon_loss, prog_bar=True)
         self.log("train/commit_loss", commit_loss, prog_bar=True)
 
-        # TODO: put this back later
-        # # Log codebook usage
-        # unique_codes_per_quantizer = []
-        # for q in range(indices.shape[-1]):
-        #     unique_codes = indices[:, q].unique().numel()
-        #     unique_codes_per_quantizer.append(unique_codes)
-        #     self.log(f"train/unique_codes_q{q}", float(unique_codes))
-
-        # self.log(
-        #     "train/avg_unique_codes",
-        #     float(sum(unique_codes_per_quantizer) / len(unique_codes_per_quantizer)),
-        # )
+        # Log codebook utilization per quantizer
+        self._log_codebook_utilization(indices, batch["mask"], stage="train")
 
         return total_loss
+
+    def _log_codebook_utilization(
+        self, indices: torch.Tensor, mask: torch.Tensor, stage: str = "train",
+    ) -> None:
+        """Log per-quantizer codebook utilization.
+
+        Args:
+            indices: [batch_size, n_csts, num_quantizers] with -1 for masked.
+            mask: [batch_size, n_csts] boolean mask.
+            stage: 'train' or 'val' prefix.
+        """
+        valid_indices = indices[mask]  # [n_valid, num_quantizers]
+        utilizations = []
+        for q in range(valid_indices.shape[-1]):
+            unique_codes = valid_indices[:, q].unique().numel()
+            utilization = unique_codes / self.codebook_size
+            self.log(f"{stage}/codebook_util_q{q}", utilization)
+            utilizations.append(utilization)
+        self.log(f"{stage}/codebook_util_avg", sum(utilizations) / len(utilizations))
 
     def validation_step(
         self, batch: Dict[str, torch.Tensor], batch_idx: int
@@ -183,6 +193,9 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("val/total_loss", total_loss, prog_bar=True)
         self.log("val/recon_loss", recon_loss, prog_bar=True)
         self.log("val/commit_loss", commit_loss, prog_bar=True)
+
+        # Log codebook utilization per quantizer
+        self._log_codebook_utilization(indices, batch["mask"], stage="val")
 
         return {"val_loss": total_loss, "indices": indices}
 
