@@ -22,5 +22,14 @@ checkpoint_per_epoch:
   filename: last
   enable_version_counter: false
   auto_insert_metric_name: false
+checkpoint_best:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  dirpath: ${full_path}/checkpoints
+  filename: best
+  monitor: valid/total_loss
+  mode: min
+  save_top_k: 1
+  enable_version_counter: false
+  auto_insert_metric_name: false
 roc_callback:
   _target_: heptokens.callbacks.roc_plots.ROCPlotCallback

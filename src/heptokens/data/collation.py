@@ -62,9 +62,10 @@ class VqvaeTokenizer:
             batch = {
                 k: (v.to(device) if isinstance(v, T.Tensor) else v) for k, v in jet_dict.items()
             }
-            _, indices, _ = model.encode(batch)
+            z_q, indices, _ = model.encode(batch)
             # indices = indices.to("cpu")  # NOTE: this is needed if running in preprocessing.
         jet_dict["tokens"] = indices
+        jet_dict["z_q"] = z_q
         return jet_dict
 
 

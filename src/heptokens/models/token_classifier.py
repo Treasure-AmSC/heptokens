@@ -291,6 +291,41 @@ class FeatureEmbedder(Embedder):
         return embeddings, mask
 
 
+class VectorEmbedder(Embedder):
+    """Embedder using VQ-VAE codebook vectors (z_q) instead of token IDs."""
+
+    def __init__(
+        self,
+        codebook_dim: int,
+        d_model: int,
+        tokenizer_ckpt: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.codebook_dim = codebook_dim
+        self.d_model = d_model
+        self.projection = T.nn.Linear(codebook_dim, d_model)
+
+        self.tokenizer = None
+        if tokenizer_ckpt is not None:
+            self.tokenizer = VqvaeTokenizer(tokenizer_ckpt)
+
+    @property
+    def output_dim(self) -> int:
+        return self.d_model
+
+    def embed(self, batch: dict) -> tuple[T.Tensor, T.BoolTensor]:
+        if self.tokenizer is not None:
+            batch = self.tokenizer(batch)
+
+        z_q = batch["z_q"]       # [B, N, codebook_dim]
+        mask = batch["mask"]     # [B, N]
+
+        z_q = T.where(mask.unsqueeze(-1), z_q, T.zeros_like(z_q))
+        embeddings = self.projection(z_q)
+
+        return embeddings, mask
+
+
 class JetClassifier(ScheduledOptimiserMixin, LightningModule):
     """General-purpose jet classifier with pluggable components.
 
@@ -460,6 +495,57 @@ class FeatureClassifier(JetClassifier):
         embedder = FeatureEmbedder(
             input_dim=data_sample["csts"].shape[-1],
             d_model=d_model,
+        )
+        encoder = TransformerEncoder(
+            input_dim=d_model,
+            d_model=d_model,
+            n_heads=n_heads,
+            num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation=activation,
+        )
+        pooler_cls = {
+            "cls": ClsTokenPooler,
+            "mean": MeanPooler,
+            "max": MaxPooler,
+        }[pooling]
+        pooler = pooler_cls(d_model) if pooling == "cls" else pooler_cls()
+
+        super().__init__(
+            embedder=embedder,
+            encoder=encoder,
+            pooler=pooler,
+            n_classes=n_classes,
+            learning_rate=learning_rate,
+            **kwargs,
+        )
+
+
+class VectorClassifier(JetClassifier):
+    """Classifier using VQ-VAE codebook vectors (z_q) as input."""
+
+    def __init__(
+        self,
+        *,
+        data_sample: tuple | None = None,
+        n_classes: int,
+        codebook_dim: int = 8,
+        d_model: int = 128,
+        n_heads: int = 8,
+        num_layers: int = 4,
+        dim_feedforward: int = 512,
+        dropout: float = 0.0,
+        activation: str = "gelu",
+        pooling: Literal["mean", "max", "cls"] = "mean",
+        learning_rate: float = 1e-3,
+        tokenizer_ckpt: str | None = None,
+        **kwargs,
+    ) -> None:
+        embedder = VectorEmbedder(
+            codebook_dim=codebook_dim,
+            d_model=d_model,
+            tokenizer_ckpt=tokenizer_ckpt,
         )
         encoder = TransformerEncoder(
             input_dim=d_model,

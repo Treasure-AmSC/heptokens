@@ -78,10 +78,12 @@ def main(cfg: DictConfig) -> None:
 
     if cfg.get("test_only", False):
         log.info("Running test-only evaluation via validate on test data")
-        # Enable saving metrics to disk on the reconstruction monitor
+        # Enable saving metrics/predictions to disk on callbacks
         for cb in trainer.callbacks:
             if hasattr(cb, "save_metrics"):
                 cb.save_metrics = True
+            if hasattr(cb, "save_predictions"):
+                cb.save_predictions = True
         datamodule.setup(stage="test")
         trainer.validate(model, dataloaders=datamodule.test_dataloader(), ckpt_path=cfg.ckpt_path)
         # Write marker in parent dir (training run dir, not test subdir)
