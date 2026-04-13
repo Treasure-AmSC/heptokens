@@ -8,7 +8,7 @@ from lightning import LightningModule
 from vector_quantize_pytorch import ResidualVQ
 
 from heptokens.models.coders import Decoder, Encoder
-from heptokens.models.utils import ScheduledOptimiserMixin
+from heptokens.models.utils import ScheduledOptimiserMixin, compute_codebook_utilization
 
 log = logging.getLogger(__name__)
 
@@ -150,28 +150,12 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("train/commit_loss", commit_loss, prog_bar=True)
 
         # Log codebook utilization per quantizer
-        self._log_codebook_utilization(indices, batch["mask"], stage="train")
+        utils = compute_codebook_utilization(indices, batch["mask"], self.codebook_size)
+        for q, u in enumerate(utils):
+            self.log(f"train/codebook_util_q{q}", u)
+        self.log("train/codebook_util_avg", sum(utils) / len(utils))
 
         return total_loss
-
-    def _log_codebook_utilization(
-        self, indices: torch.Tensor, mask: torch.Tensor, stage: str = "train",
-    ) -> None:
-        """Log per-quantizer codebook utilization.
-
-        Args:
-            indices: [batch_size, n_csts, num_quantizers] with -1 for masked.
-            mask: [batch_size, n_csts] boolean mask.
-            stage: 'train' or 'val' prefix.
-        """
-        valid_indices = indices[mask]  # [n_valid, num_quantizers]
-        utilizations = []
-        for q in range(valid_indices.shape[-1]):
-            unique_codes = valid_indices[:, q].unique().numel()
-            utilization = unique_codes / self.codebook_size
-            self.log(f"{stage}/codebook_util_q{q}", utilization)
-            utilizations.append(utilization)
-        self.log(f"{stage}/codebook_util_avg", sum(utilizations) / len(utilizations))
 
     def validation_step(
         self, batch: Dict[str, torch.Tensor], batch_idx: int
@@ -195,7 +179,10 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("val/commit_loss", commit_loss, prog_bar=True)
 
         # Log codebook utilization per quantizer
-        self._log_codebook_utilization(indices, batch["mask"], stage="val")
+        utils = compute_codebook_utilization(indices, batch["mask"], self.codebook_size)
+        for q, u in enumerate(utils):
+            self.log(f"val/codebook_util_q{q}", u)
+        self.log("val/codebook_util_avg", sum(utils) / len(utils))
 
         return {"val_loss": total_loss, "indices": indices}
 

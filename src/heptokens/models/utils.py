@@ -1,5 +1,6 @@
 import logging
 import math
+from typing import Sequence
 
 import torch as T
 from lightning import LightningModule
@@ -116,6 +117,29 @@ def linear_warmup_cosine_decay(
         return (1 + math.cos(t)) * (1 - final_factor) / 2 + final_factor
 
     return LambdaLR(optimizer, fn)
+
+
+def compute_codebook_utilization(
+    indices: T.Tensor,
+    mask: T.Tensor,
+    codebook_size: int,
+) -> Sequence[float]:
+    """Compute per-quantizer codebook utilization.
+
+    Args:
+        indices: [batch_size, n_csts, num_quantizers] with -1 for masked.
+        mask: [batch_size, n_csts] boolean mask.
+        codebook_size: Number of codes in each codebook.
+
+    Returns:
+        List of utilization fractions, one per quantizer.
+    """
+    valid_indices = indices[mask]  # [n_valid, num_quantizers]
+    utilizations = []
+    for q in range(valid_indices.shape[-1]):
+        unique_codes = valid_indices[:, q].unique().numel()
+        utilizations.append(unique_codes / codebook_size)
+    return utilizations
 
 
 class JetBackbone(nn.Module):
