@@ -64,17 +64,21 @@ PARTICLE_TYPE_NAMES = {
 MAX_PARTICLES_PER_EVENT = 200
 
 # Define the structured dtypes for HDF5 output
-EVENT_DTYPE = np.dtype([
-    ("n_particles", np.int32),
-])
+EVENT_DTYPE = np.dtype(
+    [
+        ("n_particles", np.int32),
+    ]
+)
 
-PARTICLE_DTYPE = np.dtype([
-    ("valid", np.bool_),
-    ("pt", np.float32),
-    ("eta", np.float32),
-    ("phi", np.float32),
-    ("particle_type", np.int32),
-])
+PARTICLE_DTYPE = np.dtype(
+    [
+        ("valid", np.bool_),
+        ("pt", np.float32),
+        ("eta", np.float32),
+        ("phi", np.float32),
+        ("particle_type", np.int32),
+    ]
+)
 
 
 def extract_reco_particles(
@@ -245,9 +249,7 @@ def process_xaod_file(
                 if len(pt) == 0:
                     continue
 
-                event_arr, particles_arr = build_event_arrays(
-                    pt, eta, phi, ptype, max_particles
-                )
+                event_arr, particles_arr = build_event_arrays(pt, eta, phi, ptype, max_particles)
                 all_events.append(event_arr)
                 all_particles.append(particles_arr)
 
