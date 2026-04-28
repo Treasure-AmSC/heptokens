@@ -186,6 +186,9 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
 
         return {"val_loss": total_loss, "indices": indices}
 
-    def predict_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Predict step returns indices."""
-        return self(batch)
+    def predict_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
+        """Predict step returns indices, labels, and eventNumber if available."""
+        result = {"indices": self(batch), "labels": batch["labels"]}
+        if "eventNumber" in batch:
+            result["eventNumber"] = batch["eventNumber"]
+        return result

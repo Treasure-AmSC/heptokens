@@ -106,6 +106,9 @@ class IterMapDataset(IterableDataset):
                 labels_chunk = jets_ds[self.label_key][chunk_start:chunk_end]
                 labels_mapped = np.array([self.label_map[label] for label in labels_chunk])
 
+                # Load event numbers for this chunk
+                event_numbers_chunk = jets_ds["eventNumber"][chunk_start:chunk_end]
+
                 # Load constituent features for this chunk
                 tracks_chunk = tracks_ds[chunk_start:chunk_end, : self.num_csts]
                 csts_chunk = np.empty(
@@ -137,6 +140,7 @@ class IterMapDataset(IterableDataset):
                         "csts": csts_chunk[i],
                         "mask": mask_chunk[i],
                         "labels": labels_mapped[i],
+                        "eventNumber": event_numbers_chunk[i],
                     }
 
     def __len__(self) -> int:
@@ -383,6 +387,9 @@ class IndexedIterMapDataset(IterableDataset):
                 labels_chunk = jets_ds[self.label_key][chunk_indices]
                 labels_mapped = np.array([self.label_map[label] for label in labels_chunk])
 
+                # Load event numbers
+                event_numbers_chunk = jets_ds["eventNumber"][chunk_indices]
+
                 # Load constituent features
                 tracks_chunk = tracks_ds[chunk_indices, : self.num_csts]
                 csts_chunk = np.empty(
@@ -413,6 +420,7 @@ class IndexedIterMapDataset(IterableDataset):
                         "csts": csts_chunk[i],
                         "mask": mask_chunk[i],
                         "labels": labels_mapped[i],
+                        "eventNumber": event_numbers_chunk[i],
                     }
 
     def __len__(self) -> int:
