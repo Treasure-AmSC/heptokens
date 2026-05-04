@@ -26,11 +26,14 @@ Reconstruction:
 """
 
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 import hydra
 import numpy as np
 import torch
+from lightning.pytorch.callbacks import BasePredictionWriter
 from omegaconf import DictConfig
 
 from heptokens.models.vq_vae import LitVqVae
@@ -45,6 +48,58 @@ def extract_codebooks(model: LitVqVae) -> np.ndarray:
     return codebooks.detach().cpu().numpy()
 
 
+class MemmapPredictionWriter(BasePredictionWriter):
+    """Write predictions to memory-mapped files batch-by-batch."""
+
+    def __init__(self, tmp_dir: str, total_jets: int, num_csts: int, num_quantizers: int):
+        super().__init__(write_interval="batch")
+        self.tmp_dir = Path(tmp_dir)
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
+        self.total_jets = total_jets
+        self.pos = 0  # current write position
+
+        # Pre-allocate memory-mapped output arrays
+        self.indices_path = self.tmp_dir / "indices.npy"
+        self.labels_path = self.tmp_dir / "labels.npy"
+        self.events_path = self.tmp_dir / "eventNumber.npy"
+
+        self.indices_mmap = np.lib.format.open_memmap(
+            str(self.indices_path), mode="w+", dtype=np.int16,
+            shape=(total_jets, num_csts, num_quantizers),
+        )
+        self.labels_mmap = np.lib.format.open_memmap(
+            str(self.labels_path), mode="w+", dtype=np.int8,
+            shape=(total_jets,),
+        )
+        self.events_mmap = np.lib.format.open_memmap(
+            str(self.events_path), mode="w+", dtype=np.int64,
+            shape=(total_jets,),
+        )
+        self.has_events = False
+
+    def write_on_batch_end(
+        self, trainer, pl_module, prediction, batch_indices, batch, batch_idx, dataloader_idx
+    ):
+        indices = prediction["indices"].cpu().numpy().astype(np.int16)
+        labels = prediction["labels"].cpu().numpy().astype(np.int8)
+        n = len(labels)
+
+        self.indices_mmap[self.pos : self.pos + n] = indices
+        self.labels_mmap[self.pos : self.pos + n] = labels
+
+        if "eventNumber" in prediction:
+            self.has_events = True
+            events = prediction["eventNumber"].cpu().numpy()
+            self.events_mmap[self.pos : self.pos + n] = events
+
+        self.pos += n
+
+    def finalize(self):
+        """Flush mmaps and truncate to actual size if fewer jets than expected."""
+        del self.indices_mmap, self.labels_mmap, self.events_mmap
+        return self.pos
+
+
 @hydra.main(version_base=None, config_path="../configs", config_name="tokenize")
 def main(cfg: DictConfig) -> None:
     log.info("Instantiating data module from config")
@@ -55,37 +110,61 @@ def main(cfg: DictConfig) -> None:
     model = LitVqVae.load_from_checkpoint(cfg.ckpt_path, map_location=device)
     model.eval()
 
-    log.info("Running tokenization via trainer.predict()")
-    trainer = hydra.utils.instantiate(cfg.trainer, callbacks=[], logger=False)
-    predictions = trainer.predict(model, datamodule=datamodule)
-
-    # Gather results from all batches
-    all_indices = torch.cat([p["indices"] for p in predictions]).cpu().numpy().astype(np.int16)
-    all_labels = torch.cat([p["labels"] for p in predictions]).cpu().numpy().astype(np.int8)
-    codebooks = extract_codebooks(model)
-
-    save_dict = dict(indices=all_indices, labels=all_labels, codebooks=codebooks)
-
-    # Include eventNumber if available
-    if "eventNumber" in predictions[0]:
-        all_event_numbers = torch.cat([p["eventNumber"] for p in predictions]).cpu().numpy()
-        save_dict["eventNumber"] = all_event_numbers
-        log.info(f"Including eventNumber array of length {len(all_event_numbers):,}")
-
-    log.info(
-        f"Tokenized {len(all_labels):,} jets -> "
-        f"indices {all_indices.shape}, codebooks {codebooks.shape}"
-    )
-
-    # Save compressed npz
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = Path(cfg.datamodule.data_path).stem
-    out_path = output_dir / f"{stem}.npz"
 
-    log.info(f"Saving {out_path}")
-    np.savez_compressed(out_path, **save_dict)
-    log.info(f"Saved {out_path}: {out_path.stat().st_size / 1e9:.2f} GB")
+    # Determine dataset size for memmap pre-allocation
+    import h5py
+    with h5py.File(cfg.datamodule.data_path, "r") as f:
+        total_jets = len(f["jets"])
+    # Infer shape from model
+    num_csts = getattr(datamodule.test_set, "num_csts", 40)
+    num_quantizers = model.hparams.get("num_quantizers", 4)
+
+    # Write memmap files to local scratch (fast NVMe, plenty of space)
+    tmp_base = os.environ.get("LOCAL_TMPDIR", os.environ.get("TMPDIR", None))
+    if tmp_base is None or not Path(tmp_base).exists():
+        tmp_base = str(output_dir)
+
+    with tempfile.TemporaryDirectory(dir=tmp_base) as tmp_dir:
+        writer = MemmapPredictionWriter(tmp_dir, total_jets, num_csts, num_quantizers)
+
+        log.info(
+            f"Running tokenization via trainer.predict() "
+            f"({total_jets:,} jets, memmap to {tmp_dir})"
+        )
+        trainer = hydra.utils.instantiate(
+            cfg.trainer, callbacks=[writer], logger=False
+        )
+        trainer.predict(model, datamodule=datamodule, return_predictions=False)
+
+        # Finalize and read back (memmap = no extra RAM, just maps the file)
+        actual_jets = writer.finalize()
+        log.info(f"Wrote {actual_jets:,} jets to memmap")
+
+        indices = np.lib.format.open_memmap(str(writer.indices_path), mode="r")[:actual_jets]
+        labels = np.lib.format.open_memmap(str(writer.labels_path), mode="r")[:actual_jets]
+        codebooks = extract_codebooks(model)
+
+        stem = Path(cfg.datamodule.data_path).stem
+        out_path = output_dir / f"{stem}.npz"
+
+        save_dict = dict(indices=indices, labels=labels, codebooks=codebooks)
+        if writer.has_events:
+            event_numbers = np.lib.format.open_memmap(
+                str(writer.events_path), mode="r"
+            )[:actual_jets]
+            save_dict["eventNumber"] = event_numbers
+            log.info(f"Including eventNumber array of length {actual_jets:,}")
+
+        log.info(
+            f"Tokenized {actual_jets:,} jets -> "
+            f"indices {indices.shape}, codebooks {codebooks.shape}"
+        )
+
+        log.info(f"Saving compressed {out_path} ...")
+        np.savez_compressed(out_path, **save_dict)
+        log.info(f"Saved {out_path}: {out_path.stat().st_size / 1e9:.2f} GB")
 
 
 if __name__ == "__main__":

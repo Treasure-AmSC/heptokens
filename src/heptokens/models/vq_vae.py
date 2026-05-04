@@ -99,6 +99,37 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
 
         return z_q, indices, commit_loss.mean()
 
+    @torch.no_grad()
+    def encode_indices(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Fast index-only encoding that skips the one_hot allocation in VQ layers.
+
+        For large codebooks the F.one_hot tensor ([N*csts, codebook_size]) dominates
+        GPU memory even though it is only used for EMA updates during training.
+        This method computes indices via argmin directly.
+
+        Returns:
+            indices: [batch_size, n_csts, num_quantizers]
+        """
+        z_e = self.encoder(batch)  # [batch_size, n_csts, codebook_dim]
+        flat = z_e.reshape(-1, z_e.shape[-1])  # [N, dim]
+
+        residual = flat
+        all_indices = []
+        for layer in self.vector_quantization.layers:
+            dist = (
+                residual.pow(2).sum(1, keepdim=True)
+                - 2 * residual @ layer.embed
+                + layer.embed.pow(2).sum(0, keepdim=True)
+            )
+            embed_ind = (-dist).max(1).indices  # [N]
+            quantized = torch.nn.functional.embedding(embed_ind, layer.embed.t())
+            residual = residual - quantized
+            all_indices.append(embed_ind.view(*z_e.shape[:-1]))  # [batch, n_csts]
+
+        indices = torch.stack(all_indices, dim=-1)  # [batch, n_csts, num_quantizers]
+        indices = indices.masked_fill(~batch["mask"].unsqueeze(-1), -1)
+        return indices
+
     def decode(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode quantized embeddings.
 
@@ -188,7 +219,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
 
     def predict_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         """Predict step returns indices, labels, and eventNumber if available."""
-        result = {"indices": self(batch), "labels": batch["labels"]}
+        result = {"indices": self.encode_indices(batch), "labels": batch["labels"]}
         if "eventNumber" in batch:
             result["eventNumber"] = batch["eventNumber"]
         return result
