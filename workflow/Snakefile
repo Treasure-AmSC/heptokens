@@ -1,82 +1,489 @@
 """Snakemake workflow for training and evaluating tokenizers."""
 from pathlib import Path
+from itertools import product
 
-# Parameters
-n_jets = [10_000_000]
-# tokenizers = ["kmeans"]  # TODO: unclear how to integrate this one, useful as a baseline!
-tokenizers = ["vqvae", "transformer_vqvae", "set2vec_vqvae", "diffusion_vqvae"]
-output_dir = Path("/sdf/group/mli/samklein/code/heptokens/results/long_run")
-# TODO: set trainer.max_epochs=30 properly
+# ── Paths ─────────────────────────────────────────────────────────────────────
+WORKSPACE       = Path("/sdf/data/atlas/u/jkrupa/heptokens")
+output_dir      = WORKSPACE / "results" / "long_run"
+scan_output_dir = WORKSPACE / "results" / "vqvae_scan"
 
+# ── SLURM settings ───────────────────────────────────────────────────────────
+SLURM = f"sbatch --wait -A mli:diffpg@ampere -p ampere -t 7000 --mem=100G --gres=gpu:1 -D {WORKSPACE}"
+
+# ── Configurable suffix for ablation runs ─────────────────────────────────────
+# Usage: snakemake all_vqvae_scan --config suffix=_onlyptetaphi cst_features='[pt,deta,dphi]'
+SUFFIX = config.get("suffix", "")
+
+# Optional: restrict constituent features (applied to both train and test)
+# Pass as: --config cst_features='[pt,deta,dphi]'
+_cst_feat_cfg = config.get("cst_features", "")
+CST_FEATURES_OVERRIDE = f"'datamodule.cst_features={_cst_feat_cfg}'" if _cst_feat_cfg else ""
+
+# ── General parameters ────────────────────────────────────────────────────────
+n_jets =  [10_000_000]
+tokenizers = ["transformer_vqvae"]
+
+# ── Architecture sizes per model type ─────────────────────────────────────────
+# MLP encoder/decoder (vqvae)
+mlp_sizes = {
+    #"small":  "[64,128]",
+    "medium": "[128,256,512]", #default
+    #"large":  "[256,512,1024]",
+}
+
+# Transformer encoder/decoder (transformer_vqvae)
+transformer_sizes = {
+    #"small":  {"d_model": 64,  "n_heads": 4, "num_layers": 2, "dim_feedforward": 256},
+    "medium": {"d_model": 128, "n_heads": 8, "num_layers": 4, "dim_feedforward": 512}, #default
+    #"large":  {"d_model": 256, "n_heads": 8, "num_layers": 6, "dim_feedforward": 1024},
+}
+
+arch_sizes = {
+    "vqvae":             mlp_sizes,
+    "transformer_vqvae": transformer_sizes,
+}
+
+# Residual VQ-VAE parameters
+codebook_sizes    = [8192, 16384, 32768]
+codebook_dims     = [4, 8]
+num_quantizers    = [4]
+learning_rates    = [0.001]
+commitment_weights = [1.0]
+
+# Build list of scan config dicts so Snakemake can expand over them
+scan_configs = []
+for model in tokenizers:
+    for enc, cb, cd, nq, lr, cw, nj in product(
+        arch_sizes[model].keys(), codebook_sizes, codebook_dims,
+        num_quantizers, learning_rates, commitment_weights, n_jets,
+    ):
+        name = f"{model}_enc_{enc}_cb{cb}_cd{cd}_nq{nq}_lr{lr}_cw{cw}_nj{nj}{SUFFIX}"
+        scan_configs.append({
+            "model": model, "enc": enc, "cb": cb, "cd": cd, "nq": nq,
+            "lr": lr, "cw": cw, "nj": nj, "name": name,
+        })
+
+# No filter needed — train_tokenizer creates new runs, test_tokenizer depends on SUCCESS.txt
+scan_names = [c["name"] for c in scan_configs]
+scan_lookup = {c["name"]: c for c in scan_configs}
+
+def _arch_overrides(wc):
+    """Return encoder/decoder arch overrides appropriate for each model type."""
+    cfg = scan_lookup[wc.scan_name]
+    model = cfg["model"]
+    enc = cfg["enc"]
+    if model == "vqvae":
+        dims = mlp_sizes[enc]
+        return f"'model.encoder.model.hidden_dims={dims}' 'model.decoder.model.hidden_dims={dims}'"
+    if model == "transformer_vqvae":
+        t = transformer_sizes[enc]
+        parts = []
+        for side in ("encoder", "decoder"):
+            for k, v in t.items():
+                parts.append(f"model.{side}.model.{k}={v}")
+        return " ".join(parts)
+    return ""
+
+# ── Top-level targets ────────────────────────────────────────────────────────
 rule all:
     input:
         expand(output_dir / "{tokenizer}/n_jets_{num_jets}/SUCCESS.txt", tokenizer=tokenizers, num_jets=n_jets),
-        expand(output_dir / "classifier/feature_cf_{num_jets}/SUCCESS.txt", num_jets=n_jets),
-        expand(output_dir / "classifier/{tokenizer}_cf_{num_jets}/SUCCESS.txt", tokenizer=tokenizers, num_jets=n_jets),
+        #expand(output_dir / "classifier/feature_cf_{num_jets}/SUCCESS.txt", num_jets=n_jets),
+        #expand(output_dir / "classifier/{tokenizer}_cf_{num_jets}/SUCCESS.txt", tokenizer=tokenizers, num_jets=n_jets),
+
+rule all_vqvae_scan:
+    input:
+        expand(scan_output_dir / "vqvae_scan/{scan_name}/SUCCESS.txt", scan_name=scan_names),
+
+rule all_vqvae_test:
+    input:
+        expand(scan_output_dir / "vqvae_scan/{scan_name}/TEST_SUCCESS.txt", scan_name=scan_names),
+
+# ── VQ-VAE hyperparameter scan rule ──────────────────────────────────────────
+# Constrain scan_name to only match entries in the current scan grid
+wildcard_constraints:
+    scan_name = "|".join(scan_names),
 
 rule train_tokenizer:
     output:
-        output_dir / "{tokenizer}/n_jets_{num_jets}/SUCCESS.txt",
-        ckpt = output_dir / "{tokenizer}/n_jets_{num_jets}/checkpoints/last.ckpt",
+        scan_output_dir / "vqvae_scan/{scan_name}/SUCCESS.txt",
+        ckpt = scan_output_dir / "vqvae_scan/{scan_name}/checkpoints/best.ckpt",
     params:
-        output_dir = output_dir,
-        clip_grad = lambda wildcards: "trainer.gradient_clip_val=1.0" if wildcards.tokenizer != "kmeans" else "",
-        callbacks = lambda wildcards: "callbacks=encode" if wildcards.tokenizer != "kmeans" else "",
-    wildcard_constraints:
-        tokenizer = "|".join(tokenizers),
-    group:
-        "train_tokenizers",
+        output_dir = scan_output_dir,
+        model = lambda wc: scan_lookup[wc.scan_name]["model"],
+        arch_overrides = _arch_overrides,
+        codebook_size = lambda wc: scan_lookup[wc.scan_name]["cb"],
+        codebook_dim = lambda wc: scan_lookup[wc.scan_name]["cd"],
+        num_quantizers = lambda wc: scan_lookup[wc.scan_name]["nq"],
+        learning_rate = lambda wc: scan_lookup[wc.scan_name]["lr"],
+        commitment_weight = lambda wc: scan_lookup[wc.scan_name]["cw"],
+        n_jets = lambda wc: scan_lookup[wc.scan_name]["nj"],
+        slurm = SLURM,
     shell:
         """
-        pixi run python scripts/train.py \
-            output_dir={params.output_dir} \
-            project_name={wildcards.tokenizer} \
-            network_name=n_jets_{wildcards.num_jets} \
-            datamodule.num_jets={wildcards.num_jets} \
-            model={wildcards.tokenizer} \
-            trainer.max_epochs=30 \
-            +trainer.num_sanity_val_steps=0 \
-            {params.clip_grad} \
-            {params.callbacks}
+        {params.slurm} -J {wildcards.scan_name} \
+            -o {params.output_dir}/vqvae_scan/{wildcards.scan_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=vqvae_scan \
+                network_name={wildcards.scan_name} \
+                model={params.model} \
+                datamodule=atlas_mappable \
+                datamodule.num_jets={params.n_jets} \
+                {params.arch_overrides} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                model.optimizer.lr={params.learning_rate} \
+                +model.commitment_weight={params.commitment_weight} \
+                trainer.max_epochs=200 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.jet_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib' \
+                datamodule.transforms.preprocess.cst_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib' \
+                {CST_FEATURES_OVERRIDE}"
         """
 
-rule train_token_classifier:
+# ── VQ-VAE test evaluation rule ──────────────────────────────────────────────
+rule test_tokenizer:
     input:
-        tokenizer_ckpt = output_dir / "{tokenizer}/n_jets_{num_jets}/checkpoints/last.ckpt"
+        success = scan_output_dir / "vqvae_scan/{scan_name}/SUCCESS.txt",
+        ckpt = scan_output_dir / "vqvae_scan/{scan_name}/checkpoints/best.ckpt",
     output:
-        output_dir / "classifier/{tokenizer}_cf_{num_jets}/SUCCESS.txt"
+        scan_output_dir / "vqvae_scan/{scan_name}/TEST_SUCCESS.txt",
     params:
-        output_dir = output_dir,
-    group:
-        "train_tokenizers",
+        output_dir = scan_output_dir,
+        model = lambda wc: scan_lookup[wc.scan_name]["model"],
+        arch_overrides = _arch_overrides,
+        codebook_size = lambda wc: scan_lookup[wc.scan_name]["cb"],
+        codebook_dim = lambda wc: scan_lookup[wc.scan_name]["cd"],
+        num_quantizers = lambda wc: scan_lookup[wc.scan_name]["nq"],
+        learning_rate = lambda wc: scan_lookup[wc.scan_name]["lr"],
+        commitment_weight = lambda wc: scan_lookup[wc.scan_name]["cw"],
+        n_jets = lambda wc: scan_lookup[wc.scan_name]["nj"],
+        slurm = SLURM,
     shell:
         """
-        pixi run python scripts/train.py \
-            output_dir={params.output_dir} \
-            project_name=classifier \
-            network_name={wildcards.tokenizer}_cf_{wildcards.num_jets} \
-            datamodule=atlas_mappable \
-            datamodule.num_jets={wildcards.num_jets} \
-            model=token_classifier \
-            model.tokenizer_ckpt={input.tokenizer_ckpt} \
-            trainer.max_epochs=30 \
-            +trainer.num_sanity_val_steps=0
+        {params.slurm} -J test_{wildcards.scan_name} \
+            -o {params.output_dir}/vqvae_scan/{wildcards.scan_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=vqvae_scan \
+                network_name={wildcards.scan_name}/test \
+                model={params.model} \
+                datamodule=atlas_iterable \
+                datamodule.data_path=/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-small.h5 \
+                datamodule.train_frac=0.001 \
+                datamodule.num_workers=0 \
+                datamodule.val_frac=0.001 \
+                datamodule.test_frac=0.998 \
+                datamodule.num_workers=2 \
+                datamodule.num_csts=40 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                {params.arch_overrides} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                +model.commitment_weight={params.commitment_weight} \
+                callbacks=encode \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.jet_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib' \
+                datamodule.transforms.preprocess.cst_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib' \
+                {CST_FEATURES_OVERRIDE}"
         """
+
+# ── Classifier configuration ──────────────────────────────────────────────────
+# Classifier network size (shared by token and feature classifiers)
+clf_network = {
+    "d_model": 128,
+    "n_heads": 8,
+    "num_layers": 4,
+    "dim_feedforward": 512,
+}
+
+# Tokenizer scan points to classify (must already be trained)
+clf_tokenizer_points = [
+    {"scan_name": "transformer_vqvae_enc_medium_cb512_cd8_nq3_lr0.001_cw1.0_nj10000000",
+     "cb": 512, "cd": 8, "nq": 3},
+    {"scan_name": "transformer_vqvae_enc_large_cb32768_cd8_nq4_lr0.0003_cw1.0_nj10000000",
+     "cb": 32768, "cd": 8, "nq": 4},
+]
+
+clf_names = [p["scan_name"] for p in clf_tokenizer_points]
+clf_lookup = {p["scan_name"]: p for p in clf_tokenizer_points}
+
+def _clf_net_overrides():
+    """Classifier network Hydra overrides."""
+    return " ".join(f"model.{k}={v}" for k, v in clf_network.items())
+
+# ── Classifier targets ────────────────────────────────────────────────────────
+rule all_classifiers:
+    input:
+        # Feature baseline
+        scan_output_dir / "classifiers/feature_clf/SUCCESS.txt",
+        # Vector classifiers (z_q) for each scan point
+        expand(scan_output_dir / "classifiers/vector_clf_{clf_name}/SUCCESS.txt",
+               clf_name=clf_names),
 
 rule train_feature_classifier:
     output:
-        output_dir / "classifier/feature_cf_{num_jets}/SUCCESS.txt"
+        scan_output_dir / "classifiers/feature_clf/SUCCESS.txt",
+        scan_output_dir / "classifiers/feature_clf/checkpoints/best.ckpt",
     params:
-        output_dir = output_dir,
+        output_dir = scan_output_dir,
+        net_overrides = _clf_net_overrides(),
+        slurm = SLURM,
     shell:
         """
-        pixi run python scripts/train.py \
-            output_dir={params.output_dir} \
-            project_name=classifier \
-            network_name=feature_cf_{wildcards.num_jets} \
-            datamodule=atlas_mappable \
-            datamodule.num_jets={wildcards.num_jets} \
-            model=feature_classifier \
-            trainer.max_epochs=30 \
-            callbacks=classify \
+        {params.slurm} -J feature_clf \
+            -o {params.output_dir}/classifiers/feature_clf/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=classifiers \
+                network_name=feature_clf \
+                datamodule=atlas_mappable \
+                datamodule.num_jets=10000000 \
+                model=feature_classifier \
+                {params.net_overrides} \
+                trainer.max_epochs=30 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.enable_progress_bar=false \
+                callbacks=classify \
+                datamodule.transforms.preprocess.jet_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib' \
+                datamodule.transforms.preprocess.cst_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib'"
+        """
+
+rule train_vector_classifier:
+    input:
+        tokenizer_ckpt = ancient(scan_output_dir / "vqvae_scan/{clf_name}/checkpoints/best.ckpt"),
+    output:
+        scan_output_dir / "classifiers/vector_clf_{clf_name}/SUCCESS.txt",
+        scan_output_dir / "classifiers/vector_clf_{clf_name}/checkpoints/best.ckpt",
+    params:
+        output_dir = scan_output_dir,
+        codebook_dim = lambda wc: clf_lookup[wc.clf_name]["cd"],
+        net_overrides = _clf_net_overrides(),
+        slurm = SLURM,
+    shell:
+        """
+        {params.slurm} -J vector_clf_{wildcards.clf_name} \
+            -o {params.output_dir}/classifiers/vector_clf_{wildcards.clf_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=classifiers \
+                network_name=vector_clf_{wildcards.clf_name} \
+                datamodule=atlas_mappable \
+                datamodule.num_jets=10000000 \
+                model=vector_classifier \
+                model.tokenizer_ckpt={input.tokenizer_ckpt} \
+                model.codebook_dim={params.codebook_dim} \
+                {params.net_overrides} \
+                trainer.max_epochs=30 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.enable_progress_bar=false \
+                callbacks=classify \
+                datamodule.transforms.preprocess.jet_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib' \
+                datamodule.transforms.preprocess.cst_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib'"
+        """
+
+# ── Classifier test targets ──────────────────────────────────────────────────
+rule all_classifier_tests:
+    input:
+        scan_output_dir / "classifiers/feature_clf/TEST_SUCCESS.txt",
+        expand(scan_output_dir / "classifiers/vector_clf_{clf_name}/TEST_SUCCESS.txt",
+               clf_name=clf_names),
+
+rule test_feature_classifier:
+    input:
+        success = scan_output_dir / "classifiers/feature_clf/SUCCESS.txt",
+        ckpt = scan_output_dir / "classifiers/feature_clf/checkpoints/best.ckpt",
+    output:
+        scan_output_dir / "classifiers/feature_clf/TEST_SUCCESS.txt",
+    params:
+        output_dir = scan_output_dir,
+        net_overrides = _clf_net_overrides(),
+        slurm = SLURM,
+    shell:
+        """
+        {params.slurm} -J test_feature_clf \
+            -o {params.output_dir}/classifiers/feature_clf/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=classifiers \
+                network_name=feature_clf/test \
+                datamodule=atlas_iterable \
+                datamodule.data_path=/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-small.h5 \
+                datamodule.train_frac=0.001 \
+                datamodule.val_frac=0.001 \
+                datamodule.test_frac=0.998 \
+                datamodule.num_workers=2 \
+                datamodule.num_csts=40 \
+                model=feature_classifier \
+                {params.net_overrides} \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=classify \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.jet_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib' \
+                datamodule.transforms.preprocess.cst_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib'"
+        """
+
+rule test_vector_classifier:
+    input:
+        success = scan_output_dir / "classifiers/vector_clf_{clf_name}/SUCCESS.txt",
+        ckpt = scan_output_dir / "classifiers/vector_clf_{clf_name}/checkpoints/best.ckpt",
+        tokenizer_ckpt = ancient(scan_output_dir / "vqvae_scan/{clf_name}/checkpoints/best.ckpt"),
+    output:
+        scan_output_dir / "classifiers/vector_clf_{clf_name}/TEST_SUCCESS.txt",
+    params:
+        output_dir = scan_output_dir,
+        codebook_dim = lambda wc: clf_lookup[wc.clf_name]["cd"],
+        net_overrides = _clf_net_overrides(),
+        slurm = SLURM,
+    shell:
+        """
+        {params.slurm} -J test_vector_clf_{wildcards.clf_name} \
+            -o {params.output_dir}/classifiers/vector_clf_{wildcards.clf_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=classifiers \
+                network_name=vector_clf_{wildcards.clf_name}/test \
+                datamodule=atlas_iterable \
+                datamodule.data_path=/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-small.h5 \
+                datamodule.train_frac=0.001 \
+                datamodule.val_frac=0.001 \
+                datamodule.test_frac=0.998 \
+                datamodule.num_workers=2 \
+                datamodule.num_csts=40 \
+                model=vector_classifier \
+                model.tokenizer_ckpt={input.tokenizer_ckpt} \
+                model.codebook_dim={params.codebook_dim} \
+                {params.net_overrides} \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=classify \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.jet_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib' \
+                datamodule.transforms.preprocess.cst_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib'"
+        """
+
+# ── Hybrid VQ-VAE (MLP encoder + Transformer decoder) ────────────────────────
+HYBRID_NAME = "hybrid_vqvae_enc_large_cb32768_cd8_nq4_lr0.0003_cw1.0_nj10000000"
+
+rule train_hybrid_vqvae:
+    output:
+        scan_output_dir / f"vqvae_scan/{HYBRID_NAME}/SUCCESS.txt",
+        ckpt = scan_output_dir / f"vqvae_scan/{HYBRID_NAME}/checkpoints/best.ckpt",
+    params:
+        output_dir = scan_output_dir,
+        slurm = SLURM,
+    shell:
+        """
+        {params.slurm} -J hybrid_vqvae \
+            -o {params.output_dir}/vqvae_scan/""" + HYBRID_NAME + """/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=vqvae_scan \
+                network_name=""" + HYBRID_NAME + """ \
+                model=hybrid_vqvae \
+                datamodule=atlas_mappable \
+                datamodule.num_jets=10000000 \
+                'model.encoder.model.hidden_dims=[256,512,1024]' \
+                model.decoder.model.d_model=256 \
+                model.decoder.model.n_heads=8 \
+                model.decoder.model.num_layers=6 \
+                model.decoder.model.dim_feedforward=1024 \
+                model.codebook_size=32768 \
+                model.codebook_dim=8 \
+                model.num_quantizers=4 \
+                model.learning_rate=0.0003 \
+                model.optimizer.lr=0.0003 \
+                +model.commitment_weight=1.0 \
+                trainer.max_epochs=200 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.jet_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib' \
+                datamodule.transforms.preprocess.cst_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib'"
+        """
+
+# ── Dataset tokenization ─────────────────────────────────────────────────────
+# Tokenize the full datasets (small, medium, large) with the best VQ-VAE
+TOKENIZE_H5_FILES = {
+    "small":  "/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-small.h5",
+    "medium": "/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-medium.h5",
+    "large":  "/sdf/data/atlas/u/jkrupa/mc-flavtag-ttbar-large.h5",
+}
+
+# Which VQ-VAE(s) to tokenize with (must be trained scan points)
+TOKENIZE_MODELS = [
+    "transformer_vqvae_enc_large_cb32768_cd8_nq4_lr0.0003_cw1.0_nj10000000",
+    "transformer_vqvae_enc_medium_cb512_cd8_nq3_lr0.001_cw1.0_nj10000000"
+
+]
+
+rule tokenize_all:
+    input:
+        expand(
+            scan_output_dir / "tokenized/{tok_model}/mc-flavtag-ttbar-{split}.npz",
+            tok_model=TOKENIZE_MODELS,
+            split=TOKENIZE_H5_FILES.keys(),
+        ),
+
+rule tokenize_dataset:
+    input:
+        ckpt = scan_output_dir / "vqvae_scan/{tok_model}/checkpoints/best.ckpt",
+    output:
+        scan_output_dir / "tokenized/{tok_model}/mc-flavtag-ttbar-{split}.npz",
+    params:
+        h5_path = lambda wc: TOKENIZE_H5_FILES[wc.split],
+        output_dir = lambda wc: str(scan_output_dir / "tokenized" / wc.tok_model),
+        slurm = f"sbatch --wait -A mli:diffpg@ampere -p ampere -t 7000 --mem=100G --gres=gpu:1 --cpus-per-task=8 -D {WORKSPACE}",
+    wildcard_constraints:
+        tok_model = "[^/]+",
+        split = "small|medium|large",
+    shell:
+        """
+        {params.slurm} -J tokenize_{wildcards.split} \
+            -o {params.output_dir}/slurm_tokenize_{wildcards.split}_%j.log \
+            --wrap='
+                LOCAL=/lscratch/tokenize_$$ && mkdir -p $LOCAL && \
+                trap "rm -rf $LOCAL" EXIT && \
+                export LOCAL_TMPDIR=$LOCAL && \
+                echo "Copying {params.h5_path} to $LOCAL ..." && \
+                cp {params.h5_path} $LOCAL/ && \
+                LOCAL_H5=$LOCAL/$(basename {params.h5_path}) && \
+                echo "Running tokenization from $LOCAL_H5, tmp=$LOCAL_TMPDIR ..." && \
+                pixi run python scripts/export_tokens.py \
+                    ckpt_path={input.ckpt} \
+                    output_dir={params.output_dir} \
+                    datamodule.data_path=$LOCAL_H5 \
+                    datamodule.batch_size=2048 \
+                    datamodule.train_frac=0.0 \
+                    datamodule.val_frac=0.0 \
+                    datamodule.test_frac=1.0 \
+                    datamodule.seed=null \
+                    datamodule.chunk_size=5000000 \
+                    datamodule.num_workers=2 \
+                    datamodule.transforms.preprocess.cst_fn.filename=/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib \
+                    datamodule.transforms.preprocess.jet_fn.filename=/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib
+            '
         """
