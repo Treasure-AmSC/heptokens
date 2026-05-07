@@ -101,7 +101,11 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
 
     @torch.no_grad()
     def encode_indices(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Fast index-only encoding that skips the one_hot allocation in VQ layers.
+        """
+        TODO: check if this exists in lucid rains.
+        if it does not, then a PR should be made there. 
+        
+        Fast index-only encoding that skips the one_hot allocation in VQ layers.
 
         For large codebooks the F.one_hot tensor ([N*csts, codebook_size]) dominates
         GPU memory even though it is only used for EMA updates during training.

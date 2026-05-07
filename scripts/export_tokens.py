@@ -33,6 +33,7 @@ from pathlib import Path
 import hydra
 import numpy as np
 import torch
+import h5py
 from lightning.pytorch.callbacks import BasePredictionWriter
 from omegaconf import DictConfig
 
@@ -114,7 +115,6 @@ def main(cfg: DictConfig) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine dataset size for memmap pre-allocation
-    import h5py
     with h5py.File(cfg.datamodule.data_path, "r") as f:
         total_jets = len(f["jets"])
     # Infer shape from model
