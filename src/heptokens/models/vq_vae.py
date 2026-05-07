@@ -8,7 +8,7 @@ from lightning import LightningModule
 from vector_quantize_pytorch import ResidualVQ
 
 from heptokens.models.coders import Decoder, Encoder
-from heptokens.models.utils import ScheduledOptimiserMixin
+from heptokens.models.utils import ScheduledOptimiserMixin, compute_codebook_utilization
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +50,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
 
         self.learning_rate = learning_rate
         self.reconstruction_weight = reconstruction_weight
+        self.codebook_size = codebook_size
 
         # Infer input dimension from data_sample if provided
         if data_sample is not None:
@@ -97,6 +98,41 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         indices = indices.masked_fill(~batch["mask"].unsqueeze(-1), -1)
 
         return z_q, indices, commit_loss.mean()
+
+    @torch.no_grad()
+    def encode_indices(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        TODO: check if this exists in lucid rains.
+        if it does not, then a PR should be made there. 
+        
+        Fast index-only encoding that skips the one_hot allocation in VQ layers.
+
+        For large codebooks the F.one_hot tensor ([N*csts, codebook_size]) dominates
+        GPU memory even though it is only used for EMA updates during training.
+        This method computes indices via argmin directly.
+
+        Returns:
+            indices: [batch_size, n_csts, num_quantizers]
+        """
+        z_e = self.encoder(batch)  # [batch_size, n_csts, codebook_dim]
+        flat = z_e.reshape(-1, z_e.shape[-1])  # [N, dim]
+
+        residual = flat
+        all_indices = []
+        for layer in self.vector_quantization.layers:
+            dist = (
+                residual.pow(2).sum(1, keepdim=True)
+                - 2 * residual @ layer.embed
+                + layer.embed.pow(2).sum(0, keepdim=True)
+            )
+            embed_ind = (-dist).max(1).indices  # [N]
+            quantized = torch.nn.functional.embedding(embed_ind, layer.embed.t())
+            residual = residual - quantized
+            all_indices.append(embed_ind.view(*z_e.shape[:-1]))  # [batch, n_csts]
+
+        indices = torch.stack(all_indices, dim=-1)  # [batch, n_csts, num_quantizers]
+        indices = indices.masked_fill(~batch["mask"].unsqueeze(-1), -1)
+        return indices
 
     def decode(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode quantized embeddings.
@@ -148,18 +184,11 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("train/recon_loss", recon_loss, prog_bar=True)
         self.log("train/commit_loss", commit_loss, prog_bar=True)
 
-        # TODO: put this back later
-        # # Log codebook usage
-        # unique_codes_per_quantizer = []
-        # for q in range(indices.shape[-1]):
-        #     unique_codes = indices[:, q].unique().numel()
-        #     unique_codes_per_quantizer.append(unique_codes)
-        #     self.log(f"train/unique_codes_q{q}", float(unique_codes))
-
-        # self.log(
-        #     "train/avg_unique_codes",
-        #     float(sum(unique_codes_per_quantizer) / len(unique_codes_per_quantizer)),
-        # )
+        # Log codebook utilization per quantizer
+        utils = compute_codebook_utilization(indices, batch["mask"], self.codebook_size)
+        for q, u in enumerate(utils):
+            self.log(f"train/codebook_util_q{q}", u)
+        self.log("train/codebook_util_avg", sum(utils) / len(utils))
 
         return total_loss
 
@@ -184,8 +213,17 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("val/recon_loss", recon_loss, prog_bar=True)
         self.log("val/commit_loss", commit_loss, prog_bar=True)
 
+        # Log codebook utilization per quantizer
+        utils = compute_codebook_utilization(indices, batch["mask"], self.codebook_size)
+        for q, u in enumerate(utils):
+            self.log(f"val/codebook_util_q{q}", u)
+        self.log("val/codebook_util_avg", sum(utils) / len(utils))
+
         return {"val_loss": total_loss, "indices": indices}
 
-    def predict_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Predict step returns indices."""
-        return self(batch)
+    def predict_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
+        """Predict step returns indices, labels, and eventNumber if available."""
+        result = {"indices": self.encode_indices(batch), "labels": batch["labels"]}
+        if "eventNumber" in batch:
+            result["eventNumber"] = batch["eventNumber"]
+        return result

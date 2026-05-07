@@ -1,4 +1,7 @@
 # In src/heptokens/callbacks/roc_plots.py (new file)
+import logging
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import mplhep as hep
 import numpy as np
@@ -7,6 +10,8 @@ import wandb
 from lightning import Callback
 from sklearn.metrics import auc, roc_curve
 
+log = logging.getLogger(__name__)
+
 
 class ROCPlotCallback(Callback):
     """Callback to generate and log HEP-style ROC curves during validation."""
@@ -14,6 +19,7 @@ class ROCPlotCallback(Callback):
     def __init__(self):
         super().__init__()
         self.validation_outputs = []
+        self.save_predictions = False  # Set True externally for test-time saving
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         """Collect validation batch outputs."""
@@ -40,6 +46,17 @@ class ROCPlotCallback(Callback):
 
         # Clear stored outputs
         self.validation_outputs.clear()
+
+        # Save predictions to disk when enabled (test_only mode)
+        if self.save_predictions:
+            output_dir = Path(trainer.default_root_dir) / "test_predictions"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            np.savez(
+                output_dir / "predictions.npz",
+                probs=all_probs,
+                labels=all_labels,
+            )
+            log.info(f"Saved test predictions to {output_dir / 'predictions.npz'}")
 
         # Create ROC plots if we have a logger
         if trainer.logger is not None and hasattr(trainer.logger, "experiment"):

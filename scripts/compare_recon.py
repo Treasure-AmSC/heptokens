@@ -139,7 +139,7 @@ def plot_cst_features(
     plt.style.use(hep.style.CMS)
     styles = _style_cycle(len(all_metrics))
 
-    n_features = all_metrics[0]["cst_original"].shape[1]
+    n_features = min(m["cst_original"].shape[1] for m in all_metrics)
     n_cols = min(4, n_features)
     n_rows = int(np.ceil(n_features / n_cols))
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))

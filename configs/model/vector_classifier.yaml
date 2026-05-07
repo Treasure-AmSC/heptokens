@@ -1,0 +1,20 @@
+_target_: heptokens.models.token_classifier.VectorClassifier
+codebook_dim: 8
+d_model: 128
+n_heads: 8
+num_layers: 4
+dim_feedforward: 512
+dropout: 0.0
+activation: gelu
+pooling: mean
+learning_rate: 1.0e-3
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 1.0e-3
+scheduler:
+  _target_: heptokens.models.utils.warmup_cosine_scheduler
+  _partial_: true
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+tokenizer_ckpt: null

@@ -106,6 +106,9 @@ class IterMapDataset(IterableDataset):
                 labels_chunk = jets_ds[self.label_key][chunk_start:chunk_end]
                 labels_mapped = np.array([self.label_map[label] for label in labels_chunk])
 
+                # Load event numbers for this chunk
+                event_numbers_chunk = jets_ds["eventNumber"][chunk_start:chunk_end]
+
                 # Load constituent features for this chunk
                 tracks_chunk = tracks_ds[chunk_start:chunk_end, : self.num_csts]
                 csts_chunk = np.empty(
@@ -137,6 +140,7 @@ class IterMapDataset(IterableDataset):
                         "csts": csts_chunk[i],
                         "mask": mask_chunk[i],
                         "labels": labels_mapped[i],
+                        "eventNumber": event_numbers_chunk[i],
                     }
 
     def __len__(self) -> int:
@@ -351,6 +355,7 @@ class IndexedIterMapDataset(IterableDataset):
         if worker_info is None:
             # Single-process data loading
             worker_indices = self.indices
+            initial_chunk = self.chunk_size
         else:
             # Multi-process data loading: split indices among workers
             per_worker = int(np.ceil(len(self.indices) / worker_info.num_workers))
@@ -358,6 +363,10 @@ class IndexedIterMapDataset(IterableDataset):
             start_idx = worker_id * per_worker
             end_idx = min(start_idx + per_worker, len(self.indices))
             worker_indices = self.indices[start_idx:end_idx]
+            # Stagger initial chunk size so workers don't all reload at the same time
+            initial_chunk = max(
+                1, self.chunk_size - worker_id * (self.chunk_size // max(worker_info.num_workers, 1))
+            )
 
         # Sort indices for more efficient HDF5 access
         sorted_worker_indices = np.sort(worker_indices)
@@ -367,24 +376,39 @@ class IndexedIterMapDataset(IterableDataset):
             jets_ds = handle["jets"]
             tracks_ds = handle["tracks"]
 
-            # Process in chunks
-            for chunk_start in range(0, len(sorted_worker_indices), self.chunk_size):
-                chunk_end = min(chunk_start + self.chunk_size, len(sorted_worker_indices))
-                chunk_indices = sorted_worker_indices[chunk_start:chunk_end]
+            # Process in chunks (first chunk may be smaller to stagger workers)
+            pos = 0
+            first = True
+            while pos < len(sorted_worker_indices):
+                cs = initial_chunk if first else self.chunk_size
+                first = False
+                chunk_end = min(pos + cs, len(sorted_worker_indices))
+                chunk_indices = sorted_worker_indices[pos:chunk_end]
+                pos = chunk_end
+
+                # Use slice indexing when indices are contiguous (orders of magnitude faster)
+                idx_start, idx_end = int(chunk_indices[0]), int(chunk_indices[-1]) + 1
+                if idx_end - idx_start == len(chunk_indices):
+                    sel = slice(idx_start, idx_end)
+                else:
+                    sel = chunk_indices
 
                 # Load jet features for these indices
                 jets_chunk = np.empty(
                     (len(chunk_indices), len(self.jet_features)), dtype=np.float32
                 )
                 for i, feat in enumerate(self.jet_features):
-                    jets_chunk[:, i] = jets_ds[feat][chunk_indices]
+                    jets_chunk[:, i] = jets_ds[feat][sel]
 
                 # Load labels
-                labels_chunk = jets_ds[self.label_key][chunk_indices]
+                labels_chunk = jets_ds[self.label_key][sel]
                 labels_mapped = np.array([self.label_map[label] for label in labels_chunk])
 
+                # Load event numbers
+                event_numbers_chunk = jets_ds["eventNumber"][sel]
+
                 # Load constituent features
-                tracks_chunk = tracks_ds[chunk_indices, : self.num_csts]
+                tracks_chunk = tracks_ds[sel, : self.num_csts]
                 csts_chunk = np.empty(
                     (len(chunk_indices), self.num_csts, len(self.cst_features)), dtype=np.float32
                 )
@@ -413,6 +437,7 @@ class IndexedIterMapDataset(IterableDataset):
                         "csts": csts_chunk[i],
                         "mask": mask_chunk[i],
                         "labels": labels_mapped[i],
+                        "eventNumber": event_numbers_chunk[i],
                     }
 
     def __len__(self) -> int:

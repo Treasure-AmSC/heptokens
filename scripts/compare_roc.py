@@ -5,17 +5,28 @@ Each run is specified by a directory containing ``full_config.yaml`` and a
 
 Usage
 -----
-pixi run python scripts/compare_roc.py \
-    --run_dirs results/long_run/classifier/feature_cf_10000000 \
-               results/preprocessing_study/classifier/quantile_100 \
-    --run_labels "feature (10M)" "token (quantile_100)" \
-    --data_path /sdf/scratch/users/s/samklein/data/atlas/mc-flavtag-ttbar-small.h5 \
-    --output_dir results/roc_comparison \
+# From saved predictions (no GPU needed):
+pixi run python scripts/compare_roc.py \\
+    --from_predictions \\
+    --run_dirs results/vqvae_scan/classifiers/feature_clf \\
+              results/vqvae_scan/classifiers/vector_clf_model_A \\
+    --run_labels "feature" "vector (model A)" \\
+    --output_dir results/roc_comparison \\
+    --output_name my_comparison
+
+# Re-running inference from checkpoints (requires GPU):
+pixi run python scripts/compare_roc.py \\
+    --run_dirs results/long_run/classifier/feature_cf_10000000 \\
+               results/preprocessing_study/classifier/quantile_100 \\
+    --run_labels "feature (10M)" "token (quantile_100)" \\
+    --data_path /sdf/scratch/users/s/samklein/data/atlas/mc-flavtag-ttbar-small.h5 \\
+    --output_dir results/roc_comparison \\
     --output_name my_comparison
 
 Outputs:
-  {output_dir}/{output_name}.pdf       — HEP-style ROC plot
-  {output_dir}/{output_name}_auc.csv   — per-class and macro-average AUC
+  {output_dir}/{output_name}_btag_roc.pdf  — HEP-style b-tagging ROC plot
+  {output_dir}/{output_name}_ovr_roc.pdf   — One-vs-rest ROC plot
+  {output_dir}/{output_name}_auc.csv       — per-class and macro-average AUC
 """
 
 from __future__ import annotations
@@ -363,6 +374,7 @@ def plot_comparison(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
+    fig.savefig(output_path.with_suffix(".png"), bbox_inches="tight", dpi=150)
     plt.close(fig)
     log.info("Saved one-vs-rest ROC plot → %s", output_path)
 
@@ -372,7 +384,7 @@ def _signal_eff_vs_misid(
     labels: np.ndarray,
     signal_idx: int,
     bkg_idx: int,
-    n_points: int = 2000,
+    n_points: int = 20000,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute background mis-identification rate as a function of signal efficiency.
 
@@ -470,12 +482,13 @@ def plot_btag_roc(
     ax.set_ylabel("Background Rejection", fontsize=18)
     ax.set_yscale("log")
     ax.set_xlim([0.0, 1.0])
-    ax.set_ylim([1, 1e5])
-    ax.legend(loc="upper right", fontsize=15, ncol=1)
+    ax.set_ylim([1, 1e6])
+    ax.legend(loc="upper right", fontsize=10, ncol=1)
     ax.grid(True, alpha=0.3)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
+    fig.savefig(output_path.with_suffix(".png"), bbox_inches="tight", dpi=150)
     plt.close(fig)
     log.info("Saved b-tagging ROC plot → %s", output_path)
 
@@ -506,10 +519,22 @@ def main() -> None:
         help="Human-readable label for each run (same order as --run_dirs).",
     )
     parser.add_argument(
+        "--from_predictions",
+        action="store_true",
+        help=(
+            "Load saved predictions.npz files instead of re-running inference. "
+            "Each run_dir should contain test/test_predictions/predictions.npz "
+            "with 'probs' and 'labels' arrays. No GPU required."
+        ),
+    )
+    parser.add_argument(
         "--data_path",
         type=str,
-        required=True,
-        help="Path to the ATLAS HDF5 file used for inference (validation split).",
+        default=None,
+        help=(
+            "Path to the ATLAS HDF5 file used for inference (validation split). "
+            "Required when not using --from_predictions."
+        ),
     )
     parser.add_argument(
         "--output_dir",
@@ -559,53 +584,76 @@ def main() -> None:
     for d in args.run_dirs:
         if not d.exists():
             raise SystemExit(f"Run directory does not exist: {d}")
+    if not args.from_predictions and args.data_path is None:
+        raise SystemExit("--data_path is required when not using --from_predictions.")
 
     output_dir: Path = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # Derive class labels from data once
+    # Derive class labels from data (or use defaults)
     # ------------------------------------------------------------------
-    class_names = get_class_names(args.data_path)
+    if args.data_path is not None:
+        class_names = get_class_names(args.data_path)
+    else:
+        class_names = dict(DEFAULT_CLASS_NAMES)
     log.info("Class names: %s", class_names)
 
     # ------------------------------------------------------------------
-    # Load configs & run inference for every run
+    # Load results: either from saved predictions or via inference
     # ------------------------------------------------------------------
     results: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     n_classes: int | None = None
 
-    for run_dir, run_label in zip(args.run_dirs, args.run_labels):
-        run_dir = run_dir.resolve()
-        log.info("=== %s  (%s) ===", run_label, run_dir)
+    if args.from_predictions:
+        for run_dir, run_label in zip(args.run_dirs, args.run_labels):
+            run_dir = run_dir.resolve()
+            npz_path = run_dir / "test" / "test_predictions" / "predictions.npz"
+            if not npz_path.exists():
+                # Also try the directory itself as a direct npz path
+                npz_path = run_dir / "predictions.npz"
+            if not npz_path.exists():
+                log.warning("Skipping %s: no predictions.npz found in %s", run_label, run_dir)
+                continue
+            log.info("=== %s  (loading %s) ===", run_label, npz_path)
+            data = np.load(npz_path)
+            probs, labels = data["probs"], data["labels"]
+            results[run_label] = (probs, labels)
+            if n_classes is None:
+                n_classes = probs.shape[1]
+            log.info("  %d jets, %d classes", len(labels), probs.shape[1])
+    else:
+        for run_dir, run_label in zip(args.run_dirs, args.run_labels):
+            run_dir = run_dir.resolve()
+            log.info("=== %s  (%s) ===", run_label, run_dir)
 
-        cfg = reload_original_config(
-            path=str(run_dir),
-            file_name="full_config.yaml",
-            set_ckpt_path=True,
-            ckpt_flag="last*",
-            set_wandb_resume=False,
-        )
-        if cfg is None:
-            log.warning("Skipping %s: full_config.yaml not found in %s.", run_label, run_dir)
-            continue
-        if cfg.ckpt_path is None:
-            log.warning("No checkpoint found for %s, skipping.", run_label)
-            continue
+            cfg = reload_original_config(
+                path=str(run_dir),
+                file_name="full_config.yaml",
+                set_ckpt_path=True,
+                ckpt_flag="last*",
+                set_wandb_resume=False,
+            )
+            if cfg is None:
+                log.warning("Skipping %s: full_config.yaml not found in %s.", run_label, run_dir)
+                continue
+            if cfg.ckpt_path is None:
+                log.warning("No checkpoint found for %s, skipping.", run_label)
+                continue
 
-        if n_classes is None:
-            n_classes = int(cfg.datamodule.n_classes)
+            if n_classes is None:
+                n_classes = int(cfg.datamodule.n_classes)
 
-        max_jets = args.max_jets if args.max_jets > 0 else None
-        log.info("  running inference on %s ...", cfg.ckpt_path)
-        results[run_label] = run_inference(
-            cfg,
-            args.data_path,
-            args.device,
-            max_jets=max_jets,
-            batch_size=args.batch_size,
-        )
-        gc.collect()  # reclaim memory between runs
+            max_jets = args.max_jets if args.max_jets > 0 else None
+            log.info("  running inference on %s ...", cfg.ckpt_path)
+            results[run_label] = run_inference(
+                cfg,
+                args.data_path,
+                args.device,
+                max_jets=max_jets,
+                batch_size=args.batch_size,
+            )
+            gc.collect()  # reclaim memory between runs
 
     if not results or n_classes is None:
         raise SystemExit("No valid runs loaded — nothing to plot.")
