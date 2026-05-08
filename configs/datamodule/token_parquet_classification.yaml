@@ -1,0 +1,25 @@
+---
+_target_: heptokens.data.token_parquet.TokenParquetClassificationModule
+
+signal_parquets:
+  - vqvae_signal.parquet
+background_parquets:
+  - vqvae_background.parquet
+
+train_frac: 0.7
+val_frac: 0.15
+test_frac: 0.15
+seed: 42
+max_sequences:
+
+n_classes: 2
+num_workers: 3
+batch_size: 1024
+pin_memory: true
+persistent_workers: false
+multiprocessing_context:
+transforms:
+
+token_column:
+mask_column:
+type_column:

@@ -3,9 +3,14 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import torch as T
+import torch.nn as nn
 from lightning import LightningModule
 from torch.nn.functional import cross_entropy
-from torchmetrics import Accuracy
+from torchmetrics import AUROC, Accuracy
+
+from heptokens.data.sequence import LABELS_KEY, MASK_KEY, TOKENS_KEY, TYPE_IDS_KEY
+from heptokens.models.sequence_backbone import SequenceBackbone, SequenceBackboneConfig
+from heptokens.models.utils import ScheduledOptimiserMixin
 
 if TYPE_CHECKING:
     from heptokens.models.utils import JetBackbone
@@ -93,3 +98,152 @@ class Classifier(LightningModule):
         opt = self.hparams.optimizer(params)
         sched = self.hparams.scheduler(optimizer=opt, model=self)
         return [opt], [{"scheduler": sched, "interval": "step"}]
+
+
+class SequenceClassifier(nn.Module):
+    """Classification head on top of a token-sequence backbone."""
+
+    def __init__(
+        self,
+        backbone: "SequenceBackbone",
+        num_classes: int = 2,
+        freeze_backbone: bool = False,
+    ) -> None:
+        super().__init__()
+        self.backbone = backbone
+        self.freeze_backbone = freeze_backbone
+        hidden_dim = backbone.config.hidden_dim
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, num_classes),
+        )
+
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+
+    def forward(
+        self,
+        tokens: T.Tensor,
+        mask: T.Tensor,
+        type_ids: T.Tensor | None = None,
+    ) -> T.Tensor:
+        hidden = self.backbone(tokens, mask, type_ids)
+        return self.classifier(hidden[:, 0])
+
+    def forward_batch(self, batch: dict) -> T.Tensor:
+        return self(
+            batch[TOKENS_KEY],
+            batch[MASK_KEY],
+            batch.get(TYPE_IDS_KEY),
+        )
+
+
+class LitSequenceClassifier(ScheduledOptimiserMixin, LightningModule):
+    """Lightning classifier for token-sequence batches."""
+
+    def __init__(
+        self,
+        *,
+        data_sample: dict | None = None,
+        n_classes: int,
+        backbone_ckpt_path: str | None = None,
+        hidden_dim: int = 256,
+        num_heads: int = 8,
+        num_layers: int = 4,
+        dropout: float = 0.1,
+        max_seq_length: int = 128,
+        vocab_size: int = 20000,
+        num_type_ids: int = 12,
+        mask_token_id: int = 3,
+        pad_token_id: int = 0,
+        mask_prob: float = 0.15,
+        hierarchical: bool = False,
+        n_groups: int = 3,
+        freeze_backbone: bool = False,
+        learning_rate: float = 1e-4,
+        optimizer=None,
+        scheduler=None,
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters(ignore=["data_sample"])
+        self.learning_rate = learning_rate
+        self.n_classes = n_classes
+        config = SequenceBackboneConfig(
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout=dropout,
+            max_seq_length=max_seq_length,
+            vocab_size=vocab_size,
+            num_type_ids=num_type_ids,
+            mask_token_id=mask_token_id,
+            pad_token_id=pad_token_id,
+            mask_prob=mask_prob,
+            hierarchical=hierarchical,
+            n_groups=n_groups,
+        )
+        backbone = SequenceBackbone(config)
+        if backbone_ckpt_path:
+            self._load_backbone(backbone, backbone_ckpt_path)
+        self.model = SequenceClassifier(
+            backbone,
+            num_classes=n_classes,
+            freeze_backbone=freeze_backbone,
+        )
+        self.train_acc = Accuracy("multiclass", num_classes=n_classes)
+        self.valid_acc = Accuracy("multiclass", num_classes=n_classes)
+        self.train_auc = AUROC(task="multiclass", num_classes=n_classes, average="macro")
+        self.valid_auc = AUROC(task="multiclass", num_classes=n_classes, average="macro")
+
+    def _load_backbone(self, backbone: SequenceBackbone, ckpt_path: str) -> None:
+        checkpoint = T.load(ckpt_path, map_location="cpu")
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        prefixes = (
+            "model.backbone.",
+            "backbone.",
+            "model.",
+        )
+        backbone_state = {}
+        for key, value in state_dict.items():
+            for prefix in prefixes:
+                if key.startswith(prefix):
+                    stripped = key.removeprefix(prefix)
+                    if stripped in backbone.state_dict():
+                        backbone_state[stripped] = value
+                    break
+        if not backbone_state:
+            backbone_state = state_dict
+        backbone.load_state_dict(backbone_state, strict=False)
+
+    def forward(self, batch: dict) -> T.Tensor:
+        return self.model.forward_batch(batch)
+
+    def _shared_step(self, batch: dict, prefix: str) -> T.Tensor:
+        labels = batch[LABELS_KEY]
+        output = self.forward(batch)
+        loss = cross_entropy(output, labels, label_smoothing=0.1)
+        self.log(f"{prefix}/total_loss", loss, prog_bar=True)
+
+        acc = getattr(self, f"{prefix}_acc")
+        acc(output, labels)
+        self.log(f"{prefix}/acc", acc, prog_bar=True)
+
+        auc = getattr(self, f"{prefix}_auc")
+        probs = T.softmax(output, dim=1)
+        auc(probs, labels)
+        self.log(f"{prefix}/auc", auc)
+        return loss
+
+    def training_step(self, batch: dict) -> T.Tensor:
+        return self._shared_step(batch, "train")
+
+    def validation_step(self, batch: dict) -> T.Tensor:
+        return self._shared_step(batch, "valid")
+
+    def predict_step(self, batch: dict) -> dict:
+        output = self.forward(batch)
+        labels = batch[LABELS_KEY]
+        return {"output": output, "label": labels.unsqueeze(-1)}
