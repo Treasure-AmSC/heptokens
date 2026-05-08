@@ -112,6 +112,8 @@ class LitMaskedSequenceModel(ScheduledOptimiserMixin, LightningModule):
         mask_prob: float = 0.15,
         hierarchical: bool = False,
         n_groups: int = 3,
+        use_type_embedding: bool = True,
+        use_position_embedding: bool = True,
         learning_rate: float = 1e-4,
         optimizer=None,
         scheduler=None,
@@ -132,6 +134,8 @@ class LitMaskedSequenceModel(ScheduledOptimiserMixin, LightningModule):
             mask_prob=mask_prob,
             hierarchical=hierarchical,
             n_groups=n_groups,
+            use_type_embedding=use_type_embedding,
+            use_position_embedding=use_position_embedding,
         )
         self.model = MaskedSequenceModel(self.config)
 

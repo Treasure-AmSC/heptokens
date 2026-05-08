@@ -3,6 +3,8 @@
 Sequence batches use the same naming style as the rest of the repo:
 ``tokens``, ``mask``, optional ``type_ids``, and optional ``labels``.
 """
+# TODO: Add validation for sequence batches, including shape checks,
+# token range checks, and type-id consistency checks.
 
 from __future__ import annotations
 

@@ -108,10 +108,12 @@ class SequenceClassifier(nn.Module):
         backbone: "SequenceBackbone",
         num_classes: int = 2,
         freeze_backbone: bool = False,
+        pooling: str = "cls",
     ) -> None:
         super().__init__()
         self.backbone = backbone
         self.freeze_backbone = freeze_backbone
+        self.pooling = pooling
         hidden_dim = backbone.config.hidden_dim
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -131,7 +133,19 @@ class SequenceClassifier(nn.Module):
         type_ids: T.Tensor | None = None,
     ) -> T.Tensor:
         hidden = self.backbone(tokens, mask, type_ids)
-        return self.classifier(hidden[:, 0])
+        pooled = self._pool(hidden, mask)
+        return self.classifier(pooled)
+
+    def _pool(self, hidden: T.Tensor, mask: T.Tensor) -> T.Tensor:
+        if self.pooling == "cls":
+            return hidden[:, 0]
+        if self.pooling == "mean":
+            valid = mask.bool().unsqueeze(-1)
+            return (hidden * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
+        if self.pooling == "max":
+            valid = mask.bool().unsqueeze(-1)
+            return hidden.masked_fill(~valid, float("-inf")).max(dim=1).values
+        raise ValueError(f"Unknown sequence pooling mode: {self.pooling}")
 
     def forward_batch(self, batch: dict) -> T.Tensor:
         return self(
@@ -162,6 +176,9 @@ class LitSequenceClassifier(ScheduledOptimiserMixin, LightningModule):
         mask_prob: float = 0.15,
         hierarchical: bool = False,
         n_groups: int = 3,
+        use_type_embedding: bool = True,
+        use_position_embedding: bool = True,
+        pooling: str = "cls",
         freeze_backbone: bool = False,
         learning_rate: float = 1e-4,
         optimizer=None,
@@ -184,6 +201,8 @@ class LitSequenceClassifier(ScheduledOptimiserMixin, LightningModule):
             mask_prob=mask_prob,
             hierarchical=hierarchical,
             n_groups=n_groups,
+            use_type_embedding=use_type_embedding,
+            use_position_embedding=use_position_embedding,
         )
         backbone = SequenceBackbone(config)
         if backbone_ckpt_path:
@@ -192,6 +211,7 @@ class LitSequenceClassifier(ScheduledOptimiserMixin, LightningModule):
             backbone,
             num_classes=n_classes,
             freeze_backbone=freeze_backbone,
+            pooling=pooling,
         )
         self.train_acc = Accuracy("multiclass", num_classes=n_classes)
         self.valid_acc = Accuracy("multiclass", num_classes=n_classes)

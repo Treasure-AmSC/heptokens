@@ -1,4 +1,6 @@
 """Datasets and dataloader helpers for token sequence parquet files."""
+# TODO: Replace this Parquet-only adapter with an event-level tokenization datamodule
+# once object tokenizers are integrated into the training pipeline.
 
 from __future__ import annotations
 

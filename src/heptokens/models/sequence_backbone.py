@@ -25,6 +25,8 @@ class SequenceBackboneConfig:
     mask_prob: float = 0.15
     hierarchical: bool = False
     n_groups: int = 3
+    use_type_embedding: bool = True
+    use_position_embedding: bool = True
 
 
 class GroupAttentionLayer(nn.Module):
@@ -96,8 +98,16 @@ class SequenceBackbone(nn.Module):
         super().__init__()
         self.config = config
         self.token_embedding = nn.Embedding(config.vocab_size, config.hidden_dim)
-        self.position_embedding = nn.Embedding(config.max_seq_length, config.hidden_dim)
-        self.type_embedding = nn.Embedding(config.num_type_ids, config.hidden_dim)
+        self.position_embedding = (
+            nn.Embedding(config.max_seq_length, config.hidden_dim)
+            if config.use_position_embedding
+            else None
+        )
+        self.type_embedding = (
+            nn.Embedding(config.num_type_ids, config.hidden_dim)
+            if config.use_type_embedding
+            else None
+        )
         self.group_attention = (
             GroupAttentionLayer(
                 config.hidden_dim,
@@ -127,11 +137,15 @@ class SequenceBackbone(nn.Module):
         type_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size, seq_len = mask.shape
-        if type_ids is None:
-            type_ids = torch.zeros_like(tokens)
-        x = self.token_embedding(tokens) + self.type_embedding(type_ids)
-        positions = torch.arange(seq_len, device=x.device).unsqueeze(0).expand(batch_size, -1)
-        x = self.dropout(x + self.position_embedding(positions))
+        x = self.token_embedding(tokens)
+        if self.type_embedding is not None:
+            if type_ids is None:
+                type_ids = torch.zeros_like(tokens)
+            x = x + self.type_embedding(type_ids)
+        if self.position_embedding is not None:
+            positions = torch.arange(seq_len, device=x.device).unsqueeze(0).expand(batch_size, -1)
+            x = x + self.position_embedding(positions)
+        x = self.dropout(x)
         if self.group_attention is not None:
             x = self.group_attention(x, mask)
         return self.layer_norm(self.transformer(x, mask=mask.bool()))
