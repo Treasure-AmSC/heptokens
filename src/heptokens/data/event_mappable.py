@@ -11,67 +11,110 @@ from heptokens.data.atlas_mappable import BaseMapModule
 
 log = logging.getLogger(__name__)
 
-EVENT_PARTICLE_FEATURES: list[str] = ["pt", "eta", "phi"]
+
+def _resolve_h5_path(handle: h5py.File, h5_path: str) -> np.ndarray:
+    """Read a dataset or structured-array field via a slash-separated path.
+
+    The path walks h5py groups until it reaches either a plain Dataset or a
+    structured Dataset field, e.g. ``"common/jets/pt"`` resolves to
+    ``handle["common/jets"]["pt"]`` if ``common/jets`` is a structured array.
+    """
+    parts = h5_path.strip("/").split("/")
+    node = handle
+    for i, part in enumerate(parts):
+        if isinstance(node, h5py.Dataset):
+            # Remaining parts are field names inside a structured array
+            field = "/".join(parts[i:])
+            return node[field][:]
+        node = node[part]
+    if isinstance(node, h5py.Dataset):
+        return node[:]
+    raise ValueError(f"Path {h5_path!r} did not resolve to an HDF5 dataset")
 
 
 class EventMapDataset(Dataset):
-    """Loads event-level data from HDF5 files produced by convert_xaod_to_h5.py.
+    """Loads event-level data from an HDF5 file using explicit path configuration.
 
-    The HDF5 file must contain:
-    - "events" dataset: structured array with at least an "n_particles" field
-    - "particles" dataset: structured array of shape [n_events, max_particles]
-      with a "valid" field and feature fields (pt, eta, phi, etc.)
+    Parameters
+    ----------
+    file_path:
+        Path to the HDF5 file.
+    event_inputs:
+        List of HDF5 paths for event-level scalar features, e.g.
+        ``["common/event/mu"]``.  Each path must resolve to a 1-D array of
+        length n_events.  The resulting array is stored under ``"jets"`` with
+        shape ``[n_events, len(event_inputs)]``.
+    object_collections:
+        List of dicts, each with keys ``"object_name"`` and ``"inputs"``.
+        ``"object_name"`` is the HDF5 group/dataset path (used only for logging).
+        ``"inputs"`` is a list of HDF5 paths for object features; each must
+        resolve to a 2-D array of shape ``[n_events, max_objects]``.  All
+        collections are concatenated along the feature axis and stored under
+        ``"csts"`` with shape ``[n_events, n_objects, n_features]``.
+        The first input of the first collection is used to determine n_events
+        and n_objects.
+    mask_input:
+        Optional HDF5 path for a boolean validity mask of shape
+        ``[n_events, max_objects]``.  When omitted, all objects up to
+        ``n_objects`` are treated as valid.
+    num_events:
+        If set, cap the number of events loaded.
+    num_objects:
+        If set, cap the number of objects per event loaded.
     """
 
     def __init__(
         self,
         file_path: str,
-        particle_features: list | None = None,
+        event_inputs: list[str],
+        object_collections: list[dict],
+        mask_input: str | None = None,
         num_events: int | None = None,
-        num_particles: int | None = None,
+        num_objects: int | None = None,
     ) -> None:
         super().__init__()
-        if particle_features is None:
-            particle_features = list(EVENT_PARTICLE_FEATURES)
-        self.particle_features = particle_features
 
         self.data_dict = {}
         with h5py.File(file_path, mode="r") as handle:
-            events_ds = handle["events"]
-            particles_ds = handle["particles"]
-
-            total_events = events_ds.shape[0]
+            # Determine dimensions from the first object input
+            first_input = object_collections[0]["inputs"][0]
+            probe = _resolve_h5_path(handle, first_input)
+            total_events, total_objects = probe.shape
             n_events = min(total_events, num_events) if num_events else total_events
+            n_objects = min(total_objects, num_objects) if num_objects else total_objects
 
-            total_particles = particles_ds.shape[1]
-            n_particles = min(total_particles, num_particles) if num_particles else total_particles
+            # Build csts: [n_events, n_objects, n_features]
+            feature_arrays = []
+            for collection in object_collections:
+                for inp in collection["inputs"]:
+                    arr = _resolve_h5_path(handle, inp)[:n_events, :n_objects].astype(np.float32)
+                    feature_arrays.append(arr)
+            self.data_dict["csts"] = np.stack(feature_arrays, axis=-1)
 
-            # Load particles slice (structured array)
-            particles_slice = particles_ds[:n_events, :n_particles]
+            # Build event-level feature array: [n_events, n_event_features]
+            event_arrays = []
+            for inp in event_inputs:
+                arr = _resolve_h5_path(handle, inp)[:n_events].astype(np.float32)
+                event_arrays.append(arr)
+            self.data_dict["jets"] = np.stack(event_arrays, axis=-1)
 
-            # Build csts array: [n_events, n_particles, n_features]
-            num_features = len(particle_features)
-            self.data_dict["csts"] = np.empty(
-                (n_events, n_particles, num_features), dtype=np.float32
-            )
-            for i, key in enumerate(particle_features):
-                self.data_dict["csts"][:, :, i] = particles_slice[key].astype(np.float32)
+            # Validity mask: explicit path takes priority; fall back to all-valid.
+            if mask_input is not None:
+                self.data_dict["mask"] = _resolve_h5_path(handle, mask_input)[
+                    :n_events, :n_objects
+                ].astype(bool)
+            else:
+                self.data_dict["mask"] = np.ones((n_events, n_objects), dtype=bool)
 
-            # Validity mask
-            self.data_dict["mask"] = particles_slice["valid"]
-
-            # Event-level features (analogous to jet features)
-            events_slice = events_ds[:n_events]
-            self.data_dict["jets"] = events_slice["n_particles"].astype(np.float32).reshape(-1, 1)
-
-            # Placeholder labels (no event-level classification target yet)
+            # Placeholder labels
             self.data_dict["labels"] = np.zeros(n_events, dtype=np.int64)
 
         self.num_events = self.data_dict["csts"].shape[0]
-        self.num_particles = self.data_dict["csts"].shape[1]
+        self.num_objects = self.data_dict["csts"].shape[1]
+        n_features = self.data_dict["csts"].shape[2]
         log.info(
-            f"Loaded {self.num_events} events with up to {self.num_particles} particles "
-            f"({num_features} features) from {file_path}"
+            f"Loaded {self.num_events} events with up to {self.num_objects} objects "
+            f"({n_features} features) from {file_path}"
         )
 
     def __len__(self) -> int:

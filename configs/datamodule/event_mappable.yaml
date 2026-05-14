@@ -24,8 +24,39 @@ multiprocessing_context:
 # No transforms initially -- event-level preprocessing TBD
 transforms:
 # Dataset-specific config (passed to EventMapDataset via **data_config)
-particle_features: [pt, eta, phi]
+# Optional HDF5 path for a boolean validity mask [n_events, max_objects].
+# Leave unset to treat all objects as valid.
+mask_input:
+event_inputs: # Event-level inputs not yet implemented in tokenization
+  - common/event/mu
+object_collections: 
+  - object_name: jets
+    inputs:
+    - common/jets/pt
+    - common/jets/eta
+    - common/jets/phi
+  - object_name: electrons
+    inputs:
+    - common/electrons/pt
+    - common/electrons/eta
+    - common/electrons/phi
+  - object_name: muons
+    inputs:
+    - common/muons/pt
+    - common/muons/eta
+    - common/muons/phi
+  - object_name: taus
+    inputs:
+    - common/taus/pt
+    - common/taus/eta
+    - common/taus/phi
+  - object_name: photons
+    inputs:
+    - common/photons/pt
+    - common/photons/eta
+    - common/photons/phi
+
 
 # Optional limits
 num_events:  # Use all events
-num_particles: 200  # Match MAX_PARTICLES_PER_EVENT from convert_xaod_to_h5.py
+num_objects: 200  # Maximum number of objects to use per event
