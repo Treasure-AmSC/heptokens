@@ -1,0 +1,34 @@
+---
+_target_: heptokens.data.cocoa_tracks.COCOATrackModule
+
+# Data directory containing train/val/test subdirectories
+data_dir: /fs/ddn/sdf/group/atlas/d/jkrupa/treasure/4m/data_new/COCOA_samples_singlejet
+train_dir: train_topup2_20M_cells256
+val_dir: val_100K_cells256
+test_dir: test_1M_cells256_isInfFalse
+
+# Track features to use
+features:
+  - track_pt
+  - track_eta
+  - track_phi
+  - track_d0
+  - track_z0
+
+# Maximum tracks per event (pad/truncate)
+max_csts: 15
+
+# DataLoader settings
+batch_size: 1024
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+
+# Use streaming (iterable) or in-memory (mappable) dataset
+streaming: false
+
+# Optional: limit number of events loaded per split
+num_events:
+
+# Optional transforms (preprocessing)
+transforms:

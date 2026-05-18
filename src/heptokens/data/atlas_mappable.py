@@ -123,6 +123,7 @@ class BaseMapModule(LightningDataModule, ABC):
         pin_memory: bool = True,
         persistent_workers: bool | None = None,
         multiprocessing_context: str | None = None,
+        prefetch_factor: int | None = None,
         transforms: dict | None = None,
         **data_config,
     ) -> None:
@@ -135,6 +136,7 @@ class BaseMapModule(LightningDataModule, ABC):
             num_workers > 0 if persistent_workers is None else persistent_workers
         )
         self.multiprocessing_context = multiprocessing_context
+        self.prefetch_factor = prefetch_factor
         self.transforms = transforms
         self.data_config = data_config
 

@@ -33,6 +33,8 @@ pytorch = { version = ">=2.4", channel = "pytorch" }
 torchvision = { version = ">=0.19", channel = "pytorch" }
 torchaudio = { version = ">=2.4", channel = "pytorch" }
 awkward = ">=2.8.12,<3"
+python-pptx = ">=1.0.2,<2"
+uproot = ">=5.7.4,<6"
 
 # Platform-specific dependencies
 [tool.pixi.target.linux-64.dependencies]
