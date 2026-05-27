@@ -1,0 +1,89 @@
+---
+_target_: heptokens.data.atlas_event_mappable.AtlasEventMapModule
+
+# Data path
+data_path: /path/to/event_data.h5
+# Optional list of files. If set, this overrides data_path.
+data_paths:
+
+# Split ratios (must sum to 1.0)
+train_frac: 0.7
+val_frac: 0.15
+test_frac: 0.15
+
+# Random seed for reproducible splits
+seed: 42
+
+# Number of classes (1 = no event-level classification task yet)
+n_classes: 1
+
+# DataLoader settings
+num_workers: 3
+batch_size: 1024
+pin_memory: false
+persistent_workers: false
+multiprocessing_context:
+transforms:
+
+# Dataset-specific config (passed to AtlasEventMapDataset via **data_config).
+# Feature paths are deliberately full HDF5 paths. Use common/..., atlas/...,
+# or a future experiment namespace in config without changing Python code.
+# Output modes:
+#   combined: one tokenizer across object types; concatenates objects into csts/mask
+#   object: one tokenizer for one object type; set object_type below
+output_mode: combined
+object_type:
+
+# Optional HDF5 path for a boolean validity mask [n_events, max_objects].
+# A per-object collection mask_input overrides this global mask_input.
+mask_input:
+
+# Event-level scalar inputs. These are stored under "jets" for compatibility
+# with existing heptokens tokenizer models.
+# TODO(event-tokenization): future models should get these as
+# batch["event"] directly instead of via the batch["jets"] slot.
+event_inputs:
+  - common/event/mu
+
+object_collections:
+  - object_name: jets
+    mask_input: common/jets/mask
+    inputs:
+      - common/jets/pt
+      - common/jets/eta
+      - common/jets/phi
+
+  - object_name: electrons
+    mask_input: common/electrons/mask
+    inputs:
+      - common/electrons/pt
+      - common/electrons/eta
+      - common/electrons/phi
+
+  - object_name: muons
+    mask_input: common/muons/mask
+    inputs:
+      - common/muons/pt
+      - common/muons/eta
+      - common/muons/phi
+
+  - object_name: taus
+    mask_input: common/taus/mask
+    inputs:
+      - common/taus/pt
+      - common/taus/eta
+      - common/taus/phi
+
+  - object_name: photons
+    mask_input: common/photons/mask
+    inputs:
+      - common/photons/pt
+      - common/photons/eta
+      - common/photons/phi
+
+label_key:
+
+# Optional limits
+num_events:
+num_objects: 200
+max_objects:

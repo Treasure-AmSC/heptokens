@@ -1,0 +1,102 @@
+---
+_target_: heptokens.data.atlas_event_mappable.AtlasEventMapModule
+
+data_path: /path/to/event_data.h5
+data_paths:
+
+train_frac: 0.7
+val_frac: 0.15
+test_frac: 0.15
+seed: 42
+n_classes: 1
+
+num_workers: 3
+batch_size: 1024
+pin_memory: false
+persistent_workers: false
+multiprocessing_context:
+transforms:
+
+# Train one tokenizer for one object collection.
+# Override object_type from the command line, e.g.
+# datamodule.object_type=jets or datamodule.object_type=muons.
+# Feature paths are deliberately full HDF5 paths. Use common/..., atlas/...,
+# or a future experiment namespace in config without changing Python code.
+output_mode: object
+object_type: jets
+mask_input:
+
+event_inputs:
+  # - common/event/pvx
+  # - common/event/pvy
+  # - common/event/pvz
+  - common/event/mu
+
+object_collections:
+  - object_name: jets
+    mask_input: common/jets/mask
+    inputs:
+      - common/jets/pt
+      - common/jets/eta
+      - common/jets/phi
+      # - common/jets/mass
+      # - common/jets/n_trk
+      # - atlas/jets/QG_nTracks
+      # - atlas/jets/QG_tracksWidth
+      # - atlas/jets/QG_tracksC1
+      # - atlas/jets/DL1d_pb
+      # - atlas/jets/DL1d_pc
+      # - atlas/jets/DL1d_pu
+      # - atlas/jets/GN2_pb
+      # - atlas/jets/GN2_pc
+      # - atlas/jets/GN2_pu
+
+  - object_name: electrons
+    mask_input: common/electrons/mask
+    inputs:
+      - common/electrons/pt
+      - common/electrons/eta
+      - common/electrons/phi
+      # - common/electrons/charge
+      # - common/electrons/trk_iso03
+      # - atlas/electrons/LHLoose
+      # - atlas/electrons/LHMedium
+      # - atlas/electrons/LHTight
+
+  - object_name: muons
+    mask_input: common/muons/mask
+    inputs:
+      - common/muons/pt
+      - common/muons/eta
+      - common/muons/phi
+      # - common/muons/charge
+      # - common/muons/trk_iso03
+      # - atlas/muons/quality
+      # - atlas/muons/muonType
+
+  - object_name: taus
+    mask_input: common/taus/mask
+    inputs:
+      - common/taus/pt
+      - common/taus/eta
+      - common/taus/phi
+      # - common/taus/charge
+      # - common/taus/is_1prong
+      # - atlas/taus/NNDecayMode
+      # - atlas/taus/RNNJetScore
+      # - atlas/taus/RNNEleScore
+
+  - object_name: photons
+    mask_input: common/photons/mask
+    inputs:
+      - common/photons/pt
+      - common/photons/eta
+      - common/photons/phi
+      # - common/photons/trk_iso03
+      # - atlas/photons/isLoose
+      # - atlas/photons/isTight
+
+label_key:
+num_events:
+num_objects: 200
+max_objects:
