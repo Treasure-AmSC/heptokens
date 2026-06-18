@@ -336,6 +336,8 @@ class StructuredArrayModule(BaseMapModule):
         label_key: Label field in obj_group (None to omit).
         mask_key: Mask field in set_group.
         num_elements: Cap on set members per event.
+        filter_fn: Optional function (obj_array, set_array, mask_array) → bool mask.
+            Applied after loading to remove events. Hydra-instantiable.
         train_frac: Fraction of events for training.
         val_frac: Fraction of events for validation.
         test_frac: Fraction of events for testing.
@@ -354,6 +356,7 @@ class StructuredArrayModule(BaseMapModule):
         label_key: str | None = None,
         mask_key: str = "valid",
         num_elements: int | None = None,
+        filter_fn: Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray] | None = None,
         train_frac: float = 0.8,
         val_frac: float = 0.1,
         test_frac: float = 0.1,
@@ -375,6 +378,7 @@ class StructuredArrayModule(BaseMapModule):
             label_key=label_key,
             mask_key=mask_key,
             num_elements=num_elements,
+            filter_fn=filter_fn,
         )
 
     def setup(self, stage: str | None = None) -> None:
