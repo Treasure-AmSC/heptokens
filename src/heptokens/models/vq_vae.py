@@ -54,7 +54,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
 
         # Infer input dimension from data_sample if provided
         if data_sample is not None:
-            input_dim = data_sample["csts"].shape[-1]
+            input_dim = data_sample.shape[-1]
         else:
             input_dim = 3  # Default for now
 
@@ -94,8 +94,10 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
 
         # Move dimensions [n_codes, batch_dim, n_csts] -> [batch_dim, n_csts, n_codes]
         indices = indices_batched.permute(1, 2, 0).contiguous()
-        # Set masked positions to -1
-        indices = indices.masked_fill(~batch["mask"].unsqueeze(-1), -1)
+        # Set masked positions to -1 (mask is optional; some modalities have no padding)
+        mask = batch.get("mask")
+        if mask is not None:
+            indices = indices.masked_fill(~mask.unsqueeze(-1), -1)
 
         return z_q, indices, commit_loss.mean()
 
@@ -103,8 +105,8 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
     def encode_indices(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
         TODO: check if this exists in lucid rains.
-        if it does not, then a PR should be made there. 
-        
+        if it does not, then a PR should be made there.
+
         Fast index-only encoding that skips the one_hot allocation in VQ layers.
 
         For large codebooks the F.one_hot tensor ([N*csts, codebook_size]) dominates
@@ -131,7 +133,9 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
             all_indices.append(embed_ind.view(*z_e.shape[:-1]))  # [batch, n_csts]
 
         indices = torch.stack(all_indices, dim=-1)  # [batch, n_csts, num_quantizers]
-        indices = indices.masked_fill(~batch["mask"].unsqueeze(-1), -1)
+        mask = batch.get("mask")
+        if mask is not None:
+            indices = indices.masked_fill(~mask.unsqueeze(-1), -1)
         return indices
 
     def decode(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -185,7 +189,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("train/commit_loss", commit_loss, prog_bar=True)
 
         # Log codebook utilization per quantizer
-        utils = compute_codebook_utilization(indices, batch["mask"], self.codebook_size)
+        utils = compute_codebook_utilization(indices, batch.get("mask"), self.codebook_size)
         for q, u in enumerate(utils):
             self.log(f"train/codebook_util_q{q}", u)
         self.log("train/codebook_util_avg", sum(utils) / len(utils))
@@ -214,14 +218,16 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("val/commit_loss", commit_loss, prog_bar=True)
 
         # Log codebook utilization per quantizer
-        utils = compute_codebook_utilization(indices, batch["mask"], self.codebook_size)
+        utils = compute_codebook_utilization(indices, batch.get("mask"), self.codebook_size)
         for q, u in enumerate(utils):
             self.log(f"val/codebook_util_q{q}", u)
         self.log("val/codebook_util_avg", sum(utils) / len(utils))
 
         return {"val_loss": total_loss, "indices": indices}
 
-    def predict_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
+    def predict_step(
+        self, batch: Dict[str, torch.Tensor], batch_idx: int
+    ) -> Dict[str, torch.Tensor]:
         """Predict step returns indices, labels, and eventNumber if available."""
         result = {"indices": self.encode_indices(batch), "labels": batch["labels"]}
         if "eventNumber" in batch:

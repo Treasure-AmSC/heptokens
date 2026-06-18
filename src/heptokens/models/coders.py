@@ -1,11 +1,52 @@
 # Simple encoders and decoders for use in autoencoder models.
 import logging
+from abc import ABC, abstractmethod
 from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
 
 log = logging.getLogger(__name__)
+
+
+class BaseEncoder(nn.Module, ABC):
+    """Abstract interface for VQ-VAE encoders.
+
+    All encoders must accept a batch dict and return latent embeddings.
+    The batch dict must contain at minimum the primary input tensor and,
+    for variable-length data, a boolean validity mask.
+
+    Contract:
+        forward(batch: dict) -> Tensor of shape [batch, n_tokens, codebook_dim]
+            where invalid (masked) positions are zeroed out.
+    """
+
+    @abstractmethod
+    def forward(self, batch: dict) -> torch.Tensor:
+        """Encode a batch to latent embeddings."""
+        ...
+
+
+class BaseDecoder(nn.Module, ABC):
+    """Abstract interface for VQ-VAE decoders.
+
+    All decoders must accept quantized embeddings + the original batch and
+    return reconstructed data, as well as expose a compute_loss method.
+
+    Contract:
+        forward(z_q, batch) -> reconstructed Tensor
+        compute_loss(z_q, batch) -> scalar loss Tensor
+    """
+
+    @abstractmethod
+    def forward(self, z_q: torch.Tensor, batch: dict) -> torch.Tensor:
+        """Decode quantized embeddings to data space."""
+        ...
+
+    @abstractmethod
+    def compute_loss(self, z_q: torch.Tensor, batch: dict) -> torch.Tensor:
+        """Compute reconstruction loss between decoded output and batch targets."""
+        ...
 
 
 class CoderModel(nn.Module):
@@ -50,68 +91,122 @@ class CoderModel(nn.Module):
 
 
 class Coder(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, model: nn.Module = CoderModel):
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        model: nn.Module = CoderModel,
+        input_key: str = "csts",
+        mask_key: str = "mask",
+    ):
         super(Coder, self).__init__()
         # Build coder (encoder/decoder)
         self.coder = model(input_dim=input_dim, output_dim=output_dim)
+        self.input_key = input_key
+        self.mask_key = mask_key
 
 
-class Encoder(Coder):
+class Encoder(Coder, BaseEncoder):
     def forward(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Encode input data to latent embeddings.
 
         Args:
-            batch: Dictionary containing 'csts' tensor of shape [batch_size, n_csts, d_vector]
-                and 'mask' tensor of shape [batch_size, n_csts]
+            batch: Dictionary containing the primary input tensor (key given by
+                ``self.input_key``, default ``'csts'``) of shape
+                [batch_size, n_tokens, d_vector] and an optional boolean validity
+                mask (key given by ``self.mask_key``, default ``'mask'``) of
+                shape [batch_size, n_tokens].
 
         Returns:
-            Latent embeddings of shape [n_valid, codebook_dim]
+            Latent embeddings of shape [batch_size, n_tokens, codebook_dim]
+            with invalid (masked) positions zeroed out.
         """
-
-        # Encode
-        z_e = self.coder(batch["csts"], batch["mask"])
-
+        mask = batch.get(self.mask_key)
+        z_e = self.coder(batch[self.input_key], mask)
         return z_e
 
 
-class Decoder(Coder):
+class Decoder(Coder, BaseDecoder):
     def forward(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode quantized embeddings.
 
         Args:
-            z_q: Quantized embeddings [n_valid, codebook_dim]
-            batch: Original batch dict with 'csts' and 'mask'
+            z_q: Quantized embeddings [batch_size, n_tokens, codebook_dim]
+            batch: Original batch dict; uses the mask at ``self.mask_key``
+                to process only valid positions.
 
         Returns:
-            Tuple of (reconstructed_csts, reconstruction_loss)
+            Reconstructed tensor of shape [batch_size, n_tokens, d_vector]
+            with invalid positions zeroed out.
         """
-        # Decode
-        return self.coder(z_q, batch["mask"])  # [n_valid, d_vector]
+        mask = batch.get(self.mask_key)
+        return self.coder(z_q, mask)
 
     def compute_loss(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute reconstruction loss given quantized embeddings and original batch.
-        Default is L1 loss.
+        Default is L1 loss on valid (unmasked) positions.
 
         Args:
-            z_q: Quantized embeddings [n_valid, codebook_dim]
-            batch: Original batch dict with 'csts' and 'mask'
+            z_q: Quantized embeddings [batch_size, n_tokens, codebook_dim]
+            batch: Original batch dict with the primary input at ``self.input_key``
+                and an optional mask at ``self.mask_key``.
 
         Returns:
-            Reconstruction loss tensor
+            Reconstruction loss tensor (scalar).
         """
-        csts = batch["csts"]
-        mask = batch["mask"]
+        targets = batch[self.input_key]
+        mask = batch.get(self.mask_key)
 
-        # Decode
-        reconstructed_csts = self.forward(z_q, batch)
+        reconstructed = self.forward(z_q, batch)
 
-        # Compute reconstruction loss (MSE)
-        valid_csts = csts[mask]  # [n_valid, d_vector]
-        recon_loss = nn.functional.l1_loss(reconstructed_csts[mask], valid_csts)
+        if mask is not None:
+            recon_loss = nn.functional.l1_loss(reconstructed[mask], targets[mask])
+        else:
+            recon_loss = nn.functional.l1_loss(reconstructed, targets)
         return recon_loss
 
 
-class DiffusionDecoder(nn.Module):
+class CellDecoder(Decoder):
+    """Decoder for calorimeter cell patch data with pixel-level sparsity handling.
+
+    Expects the input key to hold a tensor of shape ``[B, T, 2*n_pixels]`` where
+    the first half is the energy (energy^0.3) and the second half is a binary
+    pixel-level occupancy indicator — both computed in ``CellDataset.__getitem__``.
+
+    Loss:
+      - Binary cross-entropy on the indicator for all pixels in non-empty patches
+      - MSE on energy for pixels where the indicator is 1 (occupied pixels only)
+    """
+
+    def compute_loss(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        targets = batch[self.input_key]  # [B, T, 2*n_pixels]
+        mask = batch.get(self.mask_key)  # [B, T] bool or None
+        recon = self.forward(z_q, batch)  # [B, T, 2*n_pixels]
+
+        n = targets.shape[-1] // 2
+        energy_recon = recon[..., :n]
+        ind_logits = recon[..., n:]
+        energy_true = targets[..., :n]
+        ind_true = targets[..., n:]  # binary float {0., 1.}
+
+        if mask is not None:
+            loss_ind = nn.functional.binary_cross_entropy_with_logits(
+                ind_logits[mask], ind_true[mask]
+            )
+            pixel_mask = mask.unsqueeze(-1) & (ind_true > 0.5)
+        else:
+            loss_ind = nn.functional.binary_cross_entropy_with_logits(ind_logits, ind_true)
+            pixel_mask = ind_true > 0.5
+
+        if pixel_mask.any():
+            loss_energy = nn.functional.mse_loss(energy_recon[pixel_mask], energy_true[pixel_mask])
+        else:
+            loss_energy = recon.sum() * 0.0  # differentiable zero
+
+        return loss_energy + loss_ind
+
+
+class DiffusionDecoder(BaseDecoder):
     """Decoder using diffusion model for reconstruction loss."""
 
     def __init__(
@@ -121,6 +216,8 @@ class DiffusionDecoder(nn.Module):
         model: nn.Module = CoderModel,
         num_timesteps: int = 1000,
         beta_schedule: str = "linear",
+        input_key: str = "csts",
+        mask_key: str = "mask",
     ):
         super().__init__()
         self.num_timesteps = num_timesteps
@@ -151,6 +248,9 @@ class DiffusionDecoder(nn.Module):
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
 
+        self.input_key = input_key
+        self.mask_key = mask_key
+
         self.register_buffer("betas", betas)
         self.register_buffer("alphas", alphas)
         self.register_buffer("alphas_cumprod", alphas_cumprod)
@@ -178,7 +278,7 @@ class DiffusionDecoder(nn.Module):
         Returns:
             Generated samples [batch, n_csts, d_vector]
         """
-        mask = batch.get("mask")
+        mask = batch.get(self.mask_key)
         device = z_q.device
         batch_size, n_csts = z_q.shape[0], z_q.shape[1]
 
@@ -241,8 +341,8 @@ class DiffusionDecoder(nn.Module):
         Returns:
             Reconstruction loss tensor
         """
-        csts = batch["csts"]  # [batch, n_csts, d_vector]
-        mask = batch["mask"]  # [batch, n_csts]
+        csts = batch[self.input_key]  # [batch, n_tokens, d_vector]
+        mask = batch.get(self.mask_key)  # [batch, n_tokens] or None
 
         # Sample random timestep per batch element
         t = torch.randint(0, self.num_timesteps, (csts.shape[0],), device=csts.device)
@@ -268,9 +368,13 @@ class DiffusionDecoder(nn.Module):
         # Predict noise
         predicted_noise = self.coder(model_input, mask)  # [batch, n_csts, d_vector]
 
-        # L2 loss on predicted noise (only on valid positions)
-        valid_noise = noise[mask]
-        valid_predicted = predicted_noise[mask]
+        # L2 loss on predicted noise (only on valid positions if mask provided)
+        if mask is not None:
+            valid_noise = noise[mask]
+            valid_predicted = predicted_noise[mask]
+        else:
+            valid_noise = noise.reshape(-1, noise.shape[-1])
+            valid_predicted = predicted_noise.reshape(-1, predicted_noise.shape[-1])
         recon_loss = nn.functional.mse_loss(valid_predicted, valid_noise)
 
         return recon_loss

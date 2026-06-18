@@ -18,7 +18,7 @@ decoder:
   model:
     _target_: heptokens.models.transformer.VectorToSetTransformer
     _partial_: true
-    max_set_size: ${datamodule.num_csts}
+    max_set_size: ${datamodule.num_elements}
     d_model: 128
     n_heads: 8
     num_layers: 4

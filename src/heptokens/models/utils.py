@@ -78,10 +78,14 @@ def warmup_cosine_scheduler(
 
     warmup = min(warmup_epochs, max_epochs)
     warmup_sched = T.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=1e-2, total_iters=warmup,
+        optimizer,
+        start_factor=1e-2,
+        total_iters=warmup,
     )
     cosine_sched = T.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(max_epochs - warmup, 1), eta_min=min_lr,
+        optimizer,
+        T_max=max(max_epochs - warmup, 1),
+        eta_min=min_lr,
     )
     return T.optim.lr_scheduler.SequentialLR(
         optimizer,
@@ -121,20 +125,23 @@ def linear_warmup_cosine_decay(
 
 def compute_codebook_utilization(
     indices: T.Tensor,
-    mask: T.Tensor,
+    mask: T.Tensor | None,
     codebook_size: int,
 ) -> Sequence[float]:
     """Compute per-quantizer codebook utilization.
 
     Args:
         indices: [batch_size, n_csts, num_quantizers] with -1 for masked.
-        mask: [batch_size, n_csts] boolean mask.
+        mask: [batch_size, n_csts] boolean mask, or None for maskless modalities.
         codebook_size: Number of codes in each codebook.
 
     Returns:
         List of utilization fractions, one per quantizer.
     """
-    valid_indices = indices[mask]  # [n_valid, num_quantizers]
+    if mask is not None:
+        valid_indices = indices[mask]  # [n_valid, num_quantizers]
+    else:
+        valid_indices = indices.reshape(-1, indices.shape[-1])  # all positions valid
     utilizations = []
     for q in range(valid_indices.shape[-1]):
         unique_codes = valid_indices[:, q].unique().numel()

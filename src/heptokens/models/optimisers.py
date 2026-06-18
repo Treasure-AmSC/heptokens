@@ -9,7 +9,7 @@ from typing import Any
 import torch as T
 from torch.optim import Optimizer
 
-from .torch_utils import ParameterNoWD
+from heptokens.utils.torch_utils import ParameterNoWD
 
 log = logging.getLogger(__name__)
 

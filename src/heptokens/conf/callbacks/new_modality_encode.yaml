@@ -1,0 +1,37 @@
+---
+# configs/callbacks/new_modality_encode.yaml
+# Template callback config for VQ-VAE training on a new modality.
+#
+# Replace the reconstruction_monitor section with a class that extends
+# BaseReconstructionMonitor (heptokens.callbacks.recon).
+model_summary:
+  _target_: lightning.pytorch.callbacks.RichModelSummary
+  max_depth: 2
+lr_monitor:
+  _target_: lightning.pytorch.callbacks.LearningRateMonitor
+  logging_interval: step
+checkpoint_per_epoch:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  dirpath: ${full_path}/checkpoints
+  filename: last
+  enable_version_counter: false
+  auto_insert_metric_name: false
+# ── Reconstruction monitor ─────────────────────────────────────────────────
+# TODO: replace with your modality-specific BaseReconstructionMonitor subclass.
+#
+# Minimal stub (logs nothing beyond generic MAE/MSE from the base class):
+reconstruction_monitor:
+  _target_: heptokens.callbacks.recon.BaseReconstructionMonitor
+  log_every_n_epochs: 1
+  max_batches: 2
+#
+# For ATLAS tracks, use the existing ReconstructionMonitor instead:
+# reconstruction_monitor:
+#   _target_: heptokens.callbacks.recon.ReconstructionMonitor
+#   cst_fn:
+#     _target_: joblib.load
+#     filename: ${datamodule.transforms.preprocess.cst_fn.filename}
+#   jet_fn:
+#     _target_: joblib.load
+#     filename: ${datamodule.transforms.preprocess.jet_fn.filename}
+#   log_every_n_epochs: 1

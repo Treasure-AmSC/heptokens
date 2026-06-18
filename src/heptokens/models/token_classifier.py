@@ -317,8 +317,8 @@ class VectorEmbedder(Embedder):
         if self.tokenizer is not None:
             batch = self.tokenizer(batch)
 
-        z_q = batch["z_q"]       # [B, N, codebook_dim]
-        mask = batch["mask"]     # [B, N]
+        z_q = batch["z_q"]  # [B, N, codebook_dim]
+        mask = batch["mask"]  # [B, N]
 
         z_q = T.where(mask.unsqueeze(-1), z_q, T.zeros_like(z_q))
         embeddings = self.projection(z_q)

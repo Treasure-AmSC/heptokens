@@ -19,5 +19,5 @@ scheduler:
   _partial_: true
   warmup_epochs: 5
   min_lr: 1.0e-6
-tokenizer_ckpt: /sdf/group/mli/samklein/code/heptokens/results/test_project/test/checkpoints/last.ckpt
+tokenizer_ckpt:
 aggregate_tokens: flatten

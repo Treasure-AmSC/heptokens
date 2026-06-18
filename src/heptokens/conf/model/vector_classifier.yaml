@@ -1,3 +1,4 @@
+---
 _target_: heptokens.models.token_classifier.VectorClassifier
 codebook_dim: 8
 d_model: 128
@@ -17,4 +18,4 @@ scheduler:
   _partial_: true
   warmup_epochs: 5
   min_lr: 1.0e-6
-tokenizer_ckpt: null
+tokenizer_ckpt:

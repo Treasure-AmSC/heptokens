@@ -1,4 +1,4 @@
-"""Basic training script."""
+"""Training entry point — usable as `python -m heptokens.train` or `heptokens-train`."""
 
 import logging
 import warnings
@@ -19,13 +19,11 @@ from heptokens.utils.hydra import (
 )
 
 log = logging.getLogger(__name__)
-# Suppress torchvision image library warnings (we don't use image functionality)
 warnings.filterwarnings("ignore", message="Failed to load image Python extension")
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="train.yaml")
-def main(cfg: DictConfig) -> None:
-    """Main training script."""
+def train(cfg: DictConfig) -> None:
+    """Training logic — importable by experiment repos with their own Hydra entrypoints."""
     log.info("Setting up full job config")
 
     if cfg.full_resume:
@@ -78,7 +76,6 @@ def main(cfg: DictConfig) -> None:
 
     if cfg.get("test_only", False):
         log.info("Running test-only evaluation via validate on test data")
-        # Enable saving metrics/predictions to disk on callbacks
         for cb in trainer.callbacks:
             if hasattr(cb, "save_metrics"):
                 cb.save_metrics = True
@@ -86,7 +83,6 @@ def main(cfg: DictConfig) -> None:
                 cb.save_predictions = True
         datamodule.setup(stage="test")
         trainer.validate(model, dataloaders=datamodule.test_dataloader(), ckpt_path=cfg.ckpt_path)
-        # Write marker in parent dir (training run dir, not test subdir)
         save_declaration(filename=str(Path("..") / "TEST_SUCCESS.txt"))
     else:
         log.info("Starting training!")
@@ -96,6 +92,11 @@ def main(cfg: DictConfig) -> None:
         if trainer.state.status == "finished":
             log.info(" -- YES!! -- ")
             save_declaration()
+
+
+@hydra.main(version_base=None, config_path="pkg://heptokens.conf", config_name="train.yaml")
+def main(cfg: DictConfig) -> None:
+    train(cfg)
 
 
 if __name__ == "__main__":

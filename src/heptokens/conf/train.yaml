@@ -1,0 +1,46 @@
+---
+# @package _global_
+defaults:
+  - _self_
+  - hydra: default
+  - callbacks: pretrain
+  - model: vqvae
+  - datamodule: ???  # must be supplied by the user
+  - experiment:
+seed: 42
+project_name: my_project
+network_name: run
+output_dir: ./results
+ckpt_path:
+weight_ckpt_path:
+test_only: false
+precision: medium
+compile:
+tags:
+full_resume: false
+ckpt_flag: last.ckpt
+trainer:
+  _target_: lightning.Trainer
+  max_epochs: 1
+  enable_progress_bar: true
+  check_val_every_n_epoch:
+  accelerator: auto
+  devices: 1
+  num_nodes: 1
+  default_root_dir: ${full_path}
+  reload_dataloaders_every_n_epochs: 1
+  val_check_interval: 5_000
+  limit_val_batches: 500
+  gradient_clip_val:
+logger:
+  _target_: lightning.pytorch.loggers.wandb.WandbLogger
+  offline: false
+  id:
+  log_model: false
+  tags: ${tags}
+  project: ${project_name}
+  name: ${network_name}
+  save_dir: ${full_path}
+  resume: ${full_resume}
+root_dir: .
+full_path: ${output_dir}/${project_name}/${network_name}/

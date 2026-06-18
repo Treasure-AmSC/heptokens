@@ -1,0 +1,24 @@
+---
+# configs/model/new_modality_vqvae.yaml
+# Template VQ-VAE model config — copy and adapt for your modality.
+#
+# The VQVAE core (LitVqVae) is unchanged. Only the encoder and decoder
+# _target_ values need to point to your modality-specific classes.
+_target_: heptokens.models.vq_vae.LitVqVae
+encoder:
+  _target_: heptokens.models.new_modality_coders.MyEncoder  # TODO: update path
+  _partial_: true
+  # input_dim is inferred from data_sample at runtime (see train.py)
+  # TODO: add any extra constructor kwargs your Encoder needs
+decoder:
+  _target_: heptokens.models.new_modality_coders.MyDecoder  # TODO: update path
+  _partial_: true
+  # output_dim is inferred from data_sample at runtime (see train.py)
+  # TODO: add any extra constructor kwargs your Decoder needs
+# ── VQ-VAE hyperparameters ─────────────────────────────────────────────────
+codebook_size: 512  # number of codes per quantizer stage
+codebook_dim: 32  # latent dimension (also encoder output dim)
+num_quantizers: 4  # number of residual quantizer stages
+commitment_weight: 1.0
+reconstruction_weight: 1.0
+learning_rate: 1e-3
