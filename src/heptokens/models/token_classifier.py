@@ -493,7 +493,7 @@ class FeatureClassifier(JetClassifier):
         **kwargs,
     ) -> None:
         embedder = FeatureEmbedder(
-            input_dim=data_sample["csts"].shape[-1],
+            input_dim=data_sample.shape[-1],
             d_model=d_model,
         )
         encoder = TransformerEncoder(

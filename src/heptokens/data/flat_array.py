@@ -24,6 +24,7 @@ Example usage (ATLAS jets mapped to generic keys)::
 """
 
 import logging
+from collections.abc import Callable
 
 import h5py
 import numpy as np
@@ -86,12 +87,26 @@ class FlatArrayHDF5Dataset(Dataset):
 
 
 class FlatArrayModule(BaseMapModule):
-    """Lightning DataModule wrapping FlatArrayHDF5Dataset with fraction-based splits.
+    """Lightning DataModule wrapping a flat-array dataset with fraction-based splits.
+
+    Accepts a dataset factory (Hydra partial) so dataset params live entirely in
+    config — no module code changes needed when dataset kwargs evolve.
+
+    Example Hydra config::
+
+        _target_: heptokens.data.flat_array.FlatArrayModule
+        dataset:
+          _target_: heptokens.data.flat_array.FlatArrayHDF5Dataset
+          _partial_: true
+          file_path: /path/to/data.h5
+          key_map: {csts: csts, mask: mask}
+          num_samples: 10000
+        input_key: csts
+        batch_size: 512
 
     Args:
-        data_path: Path to the HDF5 file.
-        key_map: ``{hdf5_key: output_key}`` mapping passed to FlatArrayHDF5Dataset.
-        dtypes: Optional dtype overrides per output key.
+        dataset: Callable that returns a map-style Dataset (use ``_partial_: true``
+            in Hydra config).
         input_key: Which output key to return from ``get_data_sample()``.
         train_frac: Fraction of events for training.
         val_frac: Fraction of events for validation.
@@ -103,9 +118,7 @@ class FlatArrayModule(BaseMapModule):
     def __init__(
         self,
         *,
-        data_path: str,
-        key_map: dict[str, str],
-        dtypes: dict[str, torch.dtype] | None = None,
+        dataset: "Callable[..., Dataset]",
         input_key: str = "csts",
         train_frac: float = 0.8,
         val_frac: float = 0.1,
@@ -114,16 +127,15 @@ class FlatArrayModule(BaseMapModule):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.data_path = data_path
+        self._make_dataset = dataset
         self.input_key = input_key
         self.train_frac = train_frac
         self.val_frac = val_frac
         self.test_frac = test_frac
         self.seed = seed
-        self._ds_kwargs = dict(file_path=data_path, key_map=key_map, dtypes=dtypes)
 
     def setup(self, stage: str | None = None) -> None:
-        full_ds = FlatArrayHDF5Dataset(**self._ds_kwargs)
+        full_ds = self._make_dataset()
         n = len(full_ds)
         rng = np.random.default_rng(self.seed)
         indices = rng.permutation(n)

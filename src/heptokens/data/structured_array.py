@@ -80,34 +80,57 @@ class StructuredArrayHDF5Dataset(Dataset):
         self.label_key = label_key
 
         with h5py.File(file_path, mode="r") as f:
-            obj_ds = f[obj_group]
-            set_ds = f[set_group]
+            obj_node = f[obj_group]
+            set_node = f[set_group]
 
-            n_total = len(obj_ds[obj_features[0]])
-            n = min(n_total, num_samples) if num_samples is not None else n_total
+            # Compound datasets: single slice read (avoids re-decompressing per field)
+            # Groups: per-field read (only option)
+            if isinstance(obj_node, h5py.Dataset):
+                n_total = len(obj_node)
+                n = min(n_total, num_samples) if num_samples is not None else n_total
+                obj_raw = obj_node[:n]
+                obj_array = np.column_stack(
+                    [obj_raw[feat].astype(np.float32) for feat in obj_features]
+                )
+                raw_labels = obj_raw[label_key] if label_key is not None else None
+            else:
+                n_total = len(obj_node[obj_features[0]])
+                n = min(n_total, num_samples) if num_samples is not None else n_total
+                obj_array = np.empty((n, len(obj_features)), dtype=np.float32)
+                for i, feat in enumerate(obj_features):
+                    obj_array[:, i] = obj_node[feat][:n]
+                raw_labels = obj_node[label_key][:n] if label_key is not None else None
 
-            # Load object features
-            obj_array = np.empty((n, len(obj_features)), dtype=np.float32)
-            for i, feat in enumerate(obj_features):
-                obj_array[:, i] = obj_ds[feat][:n]
-
-            # Load labels
             labels_array = None
-            if label_key is not None:
-                raw = obj_ds[label_key][:n]
-                unique = np.unique(raw)
+            if raw_labels is not None:
+                unique = np.unique(raw_labels)
                 label_map = {lbl: idx for idx, lbl in enumerate(unique)}
-                labels_array = np.array([label_map[lbl] for lbl in raw], dtype=np.int64)
+                labels_array = np.array([label_map[lbl] for lbl in raw_labels], dtype=np.int64)
 
-            # Load set-level features
-            total_elements = set_ds[set_features[0]].shape[1]
-            nc = min(total_elements, num_elements) if num_elements is not None else total_elements
-
-            set_array = np.empty((n, nc, len(set_features)), dtype=np.float32)
-            for i, feat in enumerate(set_features):
-                set_array[:, :, i] = set_ds[feat][:n, :nc]
-
-            mask_array = set_ds[mask_key][:n, :nc]
+            if isinstance(set_node, h5py.Dataset):
+                set_raw = set_node[:n]
+                first_field = set_raw[set_features[0]]
+                total_elements = first_field.shape[1] if first_field.ndim > 1 else 1
+                nc = (
+                    min(total_elements, num_elements)
+                    if num_elements is not None
+                    else total_elements
+                )
+                set_array = np.empty((n, nc, len(set_features)), dtype=np.float32)
+                for i, feat in enumerate(set_features):
+                    set_array[:, :, i] = set_raw[feat][:, :nc]
+                mask_array = set_raw[mask_key][:, :nc]
+            else:
+                total_elements = set_node[set_features[0]].shape[1]
+                nc = (
+                    min(total_elements, num_elements)
+                    if num_elements is not None
+                    else total_elements
+                )
+                set_array = np.empty((n, nc, len(set_features)), dtype=np.float32)
+                for i, feat in enumerate(set_features):
+                    set_array[:, :, i] = set_node[feat][:n, :nc]
+                mask_array = set_node[mask_key][:n, :nc]
 
         if filter_fn is not None:
             keep = filter_fn(obj_array, set_array, mask_array)
@@ -212,10 +235,12 @@ class StructuredArrayIterableDataset(IterableDataset):
         self.filter_fn = filter_fn
 
         with h5py.File(file_path, mode="r") as f:
-            obj_ds = f[obj_group]
-            set_ds = f[set_group]
+            obj_node = f[obj_group]
+            set_node = f[set_group]
+            self._obj_is_compound = isinstance(obj_node, h5py.Dataset)
+            self._set_is_compound = isinstance(set_node, h5py.Dataset)
 
-            n_total = len(obj_ds[obj_features[0]])
+            n_total = len(obj_node) if self._obj_is_compound else len(obj_node[obj_features[0]])
             if num_samples is not None:
                 n_total = min(n_total, num_samples)
 
@@ -224,7 +249,12 @@ class StructuredArrayIterableDataset(IterableDataset):
             else:
                 self.indices = indices[indices < n_total]
 
-            total_elements = set_ds[set_features[0]].shape[1]
+            if self._set_is_compound:
+                sample_row = set_node[0]
+                first_field = sample_row[set_features[0]]
+                total_elements = len(first_field) if hasattr(first_field, "__len__") else 1
+            else:
+                total_elements = set_node[set_features[0]].shape[1]
             self.num_elements = (
                 min(total_elements, num_elements) if num_elements is not None else total_elements
             )
@@ -232,7 +262,10 @@ class StructuredArrayIterableDataset(IterableDataset):
             # Build label map up front (labels are typically small)
             self.label_map: dict | None = None
             if label_key is not None:
-                labels = obj_ds[label_key][self.indices]
+                if self._obj_is_compound:
+                    labels = obj_node[label_key][self.indices]
+                else:
+                    labels = obj_node[label_key][self.indices]
                 unique = np.unique(labels)
                 self.label_map = {lbl: idx for idx, lbl in enumerate(unique)}
 
@@ -267,8 +300,8 @@ class StructuredArrayIterableDataset(IterableDataset):
         sorted_indices = np.sort(worker_indices)
 
         with h5py.File(self.file_path, mode="r") as f:
-            obj_ds = f[self.obj_group]
-            set_ds = f[self.set_group]
+            obj_node = f[self.obj_group]
+            set_node = f[self.set_group]
 
             pos = 0
             first = True
@@ -287,25 +320,45 @@ class StructuredArrayIterableDataset(IterableDataset):
                     else chunk_idx
                 )
 
-                # Load object features
-                obj_chunk = np.empty((len(chunk_idx), len(self.obj_features)), dtype=np.float32)
-                for i, feat in enumerate(self.obj_features):
-                    obj_chunk[:, i] = obj_ds[feat][sel]
+                # Single read per node for compound datasets
+                if self._obj_is_compound:
+                    obj_raw = obj_node[sel]
+                    obj_chunk = np.column_stack(
+                        [obj_raw[feat].astype(np.float32) for feat in self.obj_features]
+                    )
+                    labels_chunk = None
+                    if self.label_key is not None and self.label_map is not None:
+                        labels_chunk = np.array(
+                            [self.label_map[lbl] for lbl in obj_raw[self.label_key]], dtype=np.int64
+                        )
+                else:
+                    obj_chunk = np.empty((len(chunk_idx), len(self.obj_features)), dtype=np.float32)
+                    for i, feat in enumerate(self.obj_features):
+                        obj_chunk[:, i] = obj_node[feat][sel]
+                    labels_chunk = None
+                    if self.label_key is not None and self.label_map is not None:
+                        raw = obj_node[self.label_key][sel]
+                        labels_chunk = np.array(
+                            [self.label_map[lbl] for lbl in raw], dtype=np.int64
+                        )
 
-                # Load labels
-                labels_chunk = None
-                if self.label_key is not None and self.label_map is not None:
-                    raw = obj_ds[self.label_key][sel]
-                    labels_chunk = np.array([self.label_map[lbl] for lbl in raw], dtype=np.int64)
-
-                # Load set-level features
-                set_chunk = np.empty(
-                    (len(chunk_idx), self.num_elements, len(self.set_features)), dtype=np.float32
-                )
-                for i, feat in enumerate(self.set_features):
-                    set_chunk[:, :, i] = set_ds[feat][sel, : self.num_elements]
-
-                mask_chunk = set_ds[self.mask_key][sel, : self.num_elements]
+                if self._set_is_compound:
+                    set_raw = set_node[sel]
+                    set_chunk = np.empty(
+                        (len(chunk_idx), self.num_elements, len(self.set_features)),
+                        dtype=np.float32,
+                    )
+                    for i, feat in enumerate(self.set_features):
+                        set_chunk[:, :, i] = set_raw[feat][:, : self.num_elements]
+                    mask_chunk = set_raw[self.mask_key][:, : self.num_elements]
+                else:
+                    set_chunk = np.empty(
+                        (len(chunk_idx), self.num_elements, len(self.set_features)),
+                        dtype=np.float32,
+                    )
+                    for i, feat in enumerate(self.set_features):
+                        set_chunk[:, :, i] = set_node[feat][sel, : self.num_elements]
+                    mask_chunk = set_node[self.mask_key][sel, : self.num_elements]
 
                 for i in range(len(chunk_idx)):
                     if self.filter_fn is not None and not self.filter_fn(
@@ -323,21 +376,29 @@ class StructuredArrayIterableDataset(IterableDataset):
 
 
 class StructuredArrayModule(BaseMapModule):
-    """Lightning DataModule wrapping StructuredArrayHDF5Dataset with fraction-based splits.
+    """Lightning DataModule wrapping a map-style dataset with fraction-based splits.
 
-    Loads a single HDF5 file and splits events into train/val/test by index.
+    Accepts a dataset factory (Hydra partial) so dataset params live entirely in
+    config — no module code changes needed when dataset kwargs evolve.
+
+    Example Hydra config::
+
+        _target_: heptokens.data.structured_array.StructuredArrayModule
+        dataset:
+          _target_: heptokens.data.structured_array.StructuredArrayHDF5Dataset
+          _partial_: true
+          file_path: /path/to/data.h5
+          obj_group: jets
+          set_group: tracks
+          obj_features: [pt, eta, phi]
+          set_features: [pt, deta, dphi]
+          num_samples: 100000
+          num_elements: 40
+        batch_size: 1024
 
     Args:
-        data_path: Path to the HDF5 file.
-        obj_group: Name of the object-level group.
-        set_group: Name of the set-level group.
-        obj_features: Field names to load from obj_group.
-        set_features: Field names to load from set_group.
-        label_key: Label field in obj_group (None to omit).
-        mask_key: Mask field in set_group.
-        num_elements: Cap on set members per event.
-        filter_fn: Optional function (obj_array, set_array, mask_array) → bool mask.
-            Applied after loading to remove events. Hydra-instantiable.
+        dataset: Callable that returns a map-style Dataset (use ``_partial_: true``
+            in Hydra config to pass a partially-applied dataset constructor).
         train_frac: Fraction of events for training.
         val_frac: Fraction of events for validation.
         test_frac: Fraction of events for testing.
@@ -348,15 +409,7 @@ class StructuredArrayModule(BaseMapModule):
     def __init__(
         self,
         *,
-        data_path: str,
-        obj_group: str,
-        set_group: str,
-        obj_features: list[str],
-        set_features: list[str],
-        label_key: str | None = None,
-        mask_key: str = "valid",
-        num_elements: int | None = None,
-        filter_fn: Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray] | None = None,
+        dataset: Callable[..., Dataset],
         train_frac: float = 0.8,
         val_frac: float = 0.1,
         test_frac: float = 0.1,
@@ -364,25 +417,14 @@ class StructuredArrayModule(BaseMapModule):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.data_path = data_path
+        self._make_dataset = dataset
         self.train_frac = train_frac
         self.val_frac = val_frac
         self.test_frac = test_frac
         self.seed = seed
-        self._ds_kwargs = dict(
-            file_path=data_path,
-            obj_group=obj_group,
-            set_group=set_group,
-            obj_features=obj_features,
-            set_features=set_features,
-            label_key=label_key,
-            mask_key=mask_key,
-            num_elements=num_elements,
-            filter_fn=filter_fn,
-        )
 
     def setup(self, stage: str | None = None) -> None:
-        full_ds = StructuredArrayHDF5Dataset(**self._ds_kwargs)
+        full_ds = self._make_dataset()
         n = len(full_ds)
         num_elements = full_ds.set_data.shape[1]
         rng = np.random.default_rng(self.seed)
@@ -396,7 +438,82 @@ class StructuredArrayModule(BaseMapModule):
         self.test_set = Subset(full_ds, indices[n_train + n_val :])
         self.test_set.num_elements = num_elements
 
+        if full_ds.labels is not None and self.n_classes is None:
+            self.n_classes = int(full_ds.labels.max()) + 1
+
     def get_data_sample(self) -> torch.Tensor:
         if not hasattr(self, "train_set"):
             self.setup()
         return self.train_set[0]["csts"]
+
+
+class StructuredArrayIterableModule(BaseMapModule):
+    """Lightning DataModule wrapping an iterable dataset with fraction-based splits.
+
+    Streams data from HDF5 in chunks without loading the full file into memory.
+    Accepts a dataset factory (Hydra partial) targeting StructuredArrayIterableDataset.
+
+    Example Hydra config::
+
+        _target_: heptokens.data.structured_array.StructuredArrayIterableModule
+        dataset:
+          _target_: heptokens.data.structured_array.StructuredArrayIterableDataset
+          _partial_: true
+          file_path: /path/to/data.h5
+          obj_group: jets
+          set_group: tracks
+          obj_features: [pt, eta, phi]
+          set_features: [pt, deta, dphi]
+          num_elements: 40
+          chunk_size: 4096
+        batch_size: 1024
+
+    Args:
+        dataset: Callable that returns an IterableDataset. Called with ``indices=``
+            kwarg to create per-split datasets.
+        train_frac: Fraction of events for training.
+        val_frac: Fraction of events for validation.
+        test_frac: Fraction of events for testing.
+        seed: Random seed for index shuffling before split.
+        **kwargs: Passed to BaseMapModule (batch_size, num_workers, etc.).
+    """
+
+    def __init__(
+        self,
+        *,
+        dataset: Callable[..., IterableDataset],
+        train_frac: float = 0.8,
+        val_frac: float = 0.1,
+        test_frac: float = 0.1,
+        seed: int = 42,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._make_dataset = dataset
+        self.train_frac = train_frac
+        self.val_frac = val_frac
+        self.test_frac = test_frac
+        self.seed = seed
+
+    def setup(self, stage: str | None = None) -> None:
+        probe = self._make_dataset()
+        n = len(probe)
+        num_elements = probe.num_elements
+        rng = np.random.default_rng(self.seed)
+        indices = rng.permutation(n)
+
+        n_train = int(n * self.train_frac)
+        n_val = int(n * self.val_frac)
+
+        self.train_set = self._make_dataset(indices=indices[:n_train])
+        self.valid_set = self._make_dataset(indices=indices[n_train : n_train + n_val])
+        self.test_set = self._make_dataset(indices=indices[n_train + n_val :])
+        self.test_set.num_elements = num_elements
+
+    def train_dataloader(self):
+        return self._get_dataloader(self.train_set, shuffle=False, drop_last=True)
+
+    def get_data_sample(self) -> torch.Tensor:
+        if not hasattr(self, "train_set"):
+            self.setup()
+        return next(iter(self.train_set))["csts"]
