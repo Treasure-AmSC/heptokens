@@ -54,8 +54,8 @@ class BaseMapModule(LightningDataModule, ABC):
         pass
 
     @abstractmethod
-    def get_data_sample(self) -> torch.Tensor:
-        """Return a representative input tensor for model initialisation."""
+    def get_data_sample(self) -> torch.Tensor | dict:
+        """Return a representative input tensor (or batch dict) for model initialisation."""
 
     def get_n_classes(self) -> int | None:
         return self.n_classes

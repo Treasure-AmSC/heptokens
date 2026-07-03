@@ -98,6 +98,7 @@ class Coder(nn.Module):
         model: nn.Module = CoderModel,
         input_key: str = "csts",
         mask_key: str = "mask",
+        data_sample=None,
     ):
         super(Coder, self).__init__()
         # Build coder (encoder/decoder)
@@ -218,6 +219,7 @@ class DiffusionDecoder(BaseDecoder):
         beta_schedule: str = "linear",
         input_key: str = "csts",
         mask_key: str = "mask",
+        data_sample=None,
     ):
         super().__init__()
         self.num_timesteps = num_timesteps
@@ -378,3 +380,44 @@ class DiffusionDecoder(BaseDecoder):
         recon_loss = nn.functional.mse_loss(valid_predicted, valid_noise)
 
         return recon_loss
+
+
+class ConditionalEncoder(BaseEncoder):
+    """Encoder that concatenates a context stream from the batch before encoding.
+
+    The inner model receives input of dimension (input_dim + context_dim).
+    Context is read from a configurable batch key and concatenated with the
+    primary input along the feature dimension.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        model: nn.Module = CoderModel,
+        input_key: str = "x_cont",
+        mask_key: str = "x_mask",
+        context_key: str = "positions",
+        data_sample: dict | None = None,
+        context_dim: int | None = None,
+    ):
+        super().__init__()
+        if context_dim is None:
+            if data_sample is not None and isinstance(data_sample, dict):
+                context_dim = data_sample[context_key].shape[-1]
+            else:
+                raise ValueError(
+                    "context_dim must be provided or inferrable from a dict data_sample"
+                )
+
+        self.input_key = input_key
+        self.mask_key = mask_key
+        self.context_key = context_key
+        self.coder = model(input_dim=input_dim + context_dim, output_dim=output_dim)
+
+    def forward(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        x = batch[self.input_key]
+        ctx = batch[self.context_key]
+        mask = batch.get(self.mask_key)
+        combined = torch.cat([x, ctx], dim=-1)
+        return self.coder(combined, mask)
