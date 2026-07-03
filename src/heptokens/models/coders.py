@@ -421,3 +421,51 @@ class ConditionalEncoder(BaseEncoder):
         mask = batch.get(self.mask_key)
         combined = torch.cat([x, ctx], dim=-1)
         return self.coder(combined, mask)
+
+
+class ConditionalDecoder(BaseDecoder):
+    """Decoder that concatenates a context stream from the batch with z_q before decoding.
+
+    The inner model receives input of dimension (input_dim + context_dim) and
+    outputs the primary feature dimension (output_dim). Loss is computed against
+    the primary input key only.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        model: nn.Module = CoderModel,
+        input_key: str = "x_cont",
+        mask_key: str = "x_mask",
+        context_key: str = "positions",
+        data_sample: dict | None = None,
+        context_dim: int | None = None,
+    ):
+        super().__init__()
+        if context_dim is None:
+            if data_sample is not None and isinstance(data_sample, dict):
+                context_dim = data_sample[context_key].shape[-1]
+            else:
+                raise ValueError(
+                    "context_dim must be provided or inferrable from a dict data_sample"
+                )
+
+        self.input_key = input_key
+        self.mask_key = mask_key
+        self.context_key = context_key
+        self.coder = model(input_dim=input_dim + context_dim, output_dim=output_dim)
+
+    def forward(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        ctx = batch[self.context_key]
+        mask = batch.get(self.mask_key)
+        combined = torch.cat([z_q, ctx], dim=-1)
+        return self.coder(combined, mask)
+
+    def compute_loss(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        targets = batch[self.input_key]
+        mask = batch.get(self.mask_key)
+        reconstructed = self.forward(z_q, batch)
+        if mask is not None:
+            return nn.functional.l1_loss(reconstructed[mask], targets[mask])
+        return nn.functional.l1_loss(reconstructed, targets)
