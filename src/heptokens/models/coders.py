@@ -1,6 +1,7 @@
 # Simple encoders and decoders for use in autoencoder models.
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Dict, Optional
 
 import torch
@@ -402,8 +403,9 @@ class ConditionalEncoder(BaseEncoder):
         context_dim: int | None = None,
     ):
         super().__init__()
+
         if context_dim is None:
-            if data_sample is not None and isinstance(data_sample, dict):
+            if data_sample is not None and isinstance(data_sample, Mapping):
                 context_dim = data_sample[context_key].shape[-1]
             else:
                 raise ValueError(
@@ -443,8 +445,10 @@ class ConditionalDecoder(BaseDecoder):
         context_dim: int | None = None,
     ):
         super().__init__()
+        from collections.abc import Mapping
+
         if context_dim is None:
-            if data_sample is not None and isinstance(data_sample, dict):
+            if data_sample is not None and isinstance(data_sample, Mapping):
                 context_dim = data_sample[context_key].shape[-1]
             else:
                 raise ValueError(

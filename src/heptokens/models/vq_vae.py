@@ -1,6 +1,7 @@
 """PyTorch Lightning wrapper for VQ-VAE with ResidualVQ."""
 
 import logging
+from collections.abc import Mapping
 from typing import Dict, Tuple
 
 import torch
@@ -54,7 +55,8 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.codebook_size = codebook_size
 
         # Infer input dimension from data_sample
-        if isinstance(data_sample, dict):
+
+        if isinstance(data_sample, Mapping):
             input_dim = data_sample[input_key].shape[-1]
         elif data_sample is not None:
             input_dim = data_sample.shape[-1]
