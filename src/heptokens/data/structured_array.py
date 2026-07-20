@@ -444,7 +444,7 @@ class StructuredArrayModule(BaseMapModule):
     def get_data_sample(self) -> torch.Tensor:
         if not hasattr(self, "train_set"):
             self.setup()
-        return self.train_set[0]["csts"]
+        return self.train_set[0]["csts"].clone()
 
 
 class StructuredArrayIterableModule(BaseMapModule):

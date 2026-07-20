@@ -1,6 +1,7 @@
 """PyTorch Lightning wrapper for VQ-VAE with ResidualVQ."""
 
 import logging
+from collections.abc import Mapping
 from typing import Dict, Tuple
 
 import torch
@@ -42,7 +43,8 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         reconstruction_weight: float = 1.0,
         optimizer=None,
         scheduler=None,
-        data_sample: torch.Tensor = None,
+        input_key: str = "csts",
+        data_sample: torch.Tensor | dict = None,
         **kwargs,
     ):
         super().__init__()
@@ -52,16 +54,20 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.reconstruction_weight = reconstruction_weight
         self.codebook_size = codebook_size
 
-        # Infer input dimension from data_sample if provided
-        if data_sample is not None:
+        # Infer input dimension from data_sample if provided. data_sample may
+        # be a plain Tensor, or a Mapping (dict/batch) — in which case the
+        # tensor at ``input_key`` (default "csts") is used.
+        if isinstance(data_sample, Mapping):
+            input_dim = data_sample[input_key].shape[-1]
+        elif data_sample is not None:
             input_dim = data_sample.shape[-1]
         else:
             input_dim = 3  # Default for now
 
         # Declare encoder
-        self.encoder = encoder(input_dim=input_dim, output_dim=codebook_dim)
+        self.encoder = encoder(input_dim=input_dim, output_dim=codebook_dim, data_sample=data_sample)
         # Declare decoder
-        self.decoder = decoder(input_dim=codebook_dim, output_dim=input_dim)
+        self.decoder = decoder(input_dim=codebook_dim, output_dim=input_dim, data_sample=data_sample)
 
         # Vector quantization
         self.vector_quantization = ResidualVQ(
