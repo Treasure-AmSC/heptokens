@@ -44,6 +44,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         optimizer=None,
         scheduler=None,
         input_key: str = "csts",
+        mask_key: str | None = "mask",
         data_sample: torch.Tensor | dict = None,
         **kwargs,
     ):
@@ -53,6 +54,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.learning_rate = learning_rate
         self.reconstruction_weight = reconstruction_weight
         self.codebook_size = codebook_size
+        self.mask_key = mask_key
 
         # Infer input dimension from data_sample if provided. data_sample may
         # be a plain Tensor, or a Mapping (dict/batch) — in which case the
@@ -100,8 +102,9 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
 
         # Move dimensions [n_codes, batch_dim, n_csts] -> [batch_dim, n_csts, n_codes]
         indices = indices_batched.permute(1, 2, 0).contiguous()
-        # Set masked positions to -1 (mask is optional; some modalities have no padding)
-        mask = batch.get("mask")
+        # Set masked positions to -1 (mask is optional; some modalities have no padding,
+        # and self.mask_key may be None to disable masking entirely)
+        mask = batch.get(self.mask_key)
         if mask is not None:
             indices = indices.masked_fill(~mask.unsqueeze(-1), -1)
 
@@ -139,7 +142,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
             all_indices.append(embed_ind.view(*z_e.shape[:-1]))  # [batch, n_csts]
 
         indices = torch.stack(all_indices, dim=-1)  # [batch, n_csts, num_quantizers]
-        mask = batch.get("mask")
+        mask = batch.get(self.mask_key)
         if mask is not None:
             indices = indices.masked_fill(~mask.unsqueeze(-1), -1)
         return indices
@@ -195,7 +198,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("train/commit_loss", commit_loss, prog_bar=True)
 
         # Log codebook utilization per quantizer
-        utils = compute_codebook_utilization(indices, batch.get("mask"), self.codebook_size)
+        utils = compute_codebook_utilization(indices, batch.get(self.mask_key), self.codebook_size)
         for q, u in enumerate(utils):
             self.log(f"train/codebook_util_q{q}", u)
         self.log("train/codebook_util_avg", sum(utils) / len(utils))
@@ -224,7 +227,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("val/commit_loss", commit_loss, prog_bar=True)
 
         # Log codebook utilization per quantizer
-        utils = compute_codebook_utilization(indices, batch.get("mask"), self.codebook_size)
+        utils = compute_codebook_utilization(indices, batch.get(self.mask_key), self.codebook_size)
         for q, u in enumerate(utils):
             self.log(f"val/codebook_util_q{q}", u)
         self.log("val/codebook_util_avg", sum(utils) / len(utils))
