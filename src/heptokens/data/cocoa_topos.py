@@ -1,4 +1,4 @@
-"""COCOA track dataset and DataModule for ROOT files."""
+"""COCOA topo cluster dataset and DataModule for ROOT files."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from heptokens.data.cocoa_base import (
     EVENTNUMBER_BRANCH,
-    TRACK_FEATURES,
+    TOPO_FEATURES,
     load_root_arrays,
     pad_jagged_to_fixed,
     root_files_from_dir,
@@ -23,23 +23,19 @@ from heptokens.data.collation import collate_and_transform
 log = logging.getLogger(__name__)
 
 
-class COCOATrackDataset(Dataset):
-    """In-memory dataset that loads COCOA tracks from ROOT files.
-
-    Each item is a single jet (event) with its track constituents
-    padded/truncated to max_csts.
-    """
+class COCOATopoDataset(Dataset):
+    """In-memory dataset that loads COCOA topo clusters from ROOT files."""
 
     def __init__(
         self,
         root_files: list[str | Path],
         features: list[str] | None = None,
-        max_csts: int = 15,
+        max_csts: int = 50,
         num_events: int | None = None,
     ) -> None:
         super().__init__()
         if features is None:
-            features = TRACK_FEATURES
+            features = TOPO_FEATURES
         self.features = features
         self.max_csts = max_csts
 
@@ -86,58 +82,8 @@ class COCOATrackDataset(Dataset):
         }
 
 
-class COCOATrackIterableDataset(IterableDataset):
-    """Streaming dataset that loads one ROOT file at a time."""
-
-    def __init__(
-        self,
-        root_files: list[str | Path],
-        features: list[str] | None = None,
-        max_csts: int = 15,
-        num_events: int | None = None,
-    ) -> None:
-        super().__init__()
-        if features is None:
-            features = TRACK_FEATURES
-        self.root_files = [Path(f) for f in root_files]
-        self.features = features
-        self.max_csts = max_csts
-        self.num_events = num_events
-
-    def __iter__(self):
-        worker_info = torch.utils.data.get_worker_info()
-        files = self.root_files
-
-        if worker_info is not None:
-            per_worker = len(files) // worker_info.num_workers
-            start = worker_info.id * per_worker
-            end = start + per_worker if worker_info.id < worker_info.num_workers - 1 else len(files)
-            files = files[start:end]
-
-        yielded = 0
-        for fpath in files:
-            if self.num_events is not None and yielded >= self.num_events:
-                return
-
-            remaining = None if self.num_events is None else self.num_events - yielded
-            arrays = load_root_arrays(fpath, self.features + [EVENTNUMBER_BRANCH], max_entries=remaining)
-            csts, mask = pad_jagged_to_fixed(arrays, self.features, self.max_csts)
-            event_numbers = np.asarray(arrays[EVENTNUMBER_BRANCH], dtype=np.int64)
-
-            for i in range(len(csts)):
-                if self.num_events is not None and yielded >= self.num_events:
-                    return
-                yield {
-                    "csts": csts[i],
-                    "mask": mask[i],
-                    "eventNumber": event_numbers[i],
-                    "labels": 0,
-                }
-                yielded += 1
-
-
-class COCOATrackModule(LightningDataModule):
-    """Lightning DataModule for COCOA track data from ROOT files."""
+class COCOATopoModule(LightningDataModule):
+    """Lightning DataModule for COCOA topo cluster data from ROOT files."""
 
     def __init__(
         self,
@@ -146,21 +92,20 @@ class COCOATrackModule(LightningDataModule):
         val_dir: str = "val_100K_cells256",
         test_dir: str = "test_1M_cells256_isInfFalse",
         features: list[str] | None = None,
-        max_csts: int = 15,
+        max_csts: int = 50,
         num_events: int | None = None,
         batch_size: int = 1024,
         num_workers: int = 4,
         pin_memory: bool = True,
         persistent_workers: bool | None = None,
         transforms: dict | None = None,
-        streaming: bool = False,
     ) -> None:
         super().__init__()
         self.data_dir = Path(data_dir)
         self.train_dir = train_dir
         self.val_dir = val_dir
         self.test_dir = test_dir
-        self.features = features or TRACK_FEATURES
+        self.features = features or TOPO_FEATURES
         self.max_csts = max_csts
         self.num_events = num_events
         self.batch_size = batch_size
@@ -170,15 +115,10 @@ class COCOATrackModule(LightningDataModule):
             num_workers > 0 if persistent_workers is None else persistent_workers
         )
         self.transforms = transforms
-        self.streaming = streaming
 
     def _make_dataset(self, split_dir: str):
         files = root_files_from_dir(self.data_dir / split_dir)
-        if self.streaming:
-            return COCOATrackIterableDataset(
-                files, self.features, self.max_csts, self.num_events
-            )
-        return COCOATrackDataset(files, self.features, self.max_csts, self.num_events)
+        return COCOATopoDataset(files, self.features, self.max_csts, self.num_events)
 
     def setup(self, stage: str = "fit") -> None:
         if stage in {"fit", "train"}:
@@ -198,13 +138,12 @@ class COCOATrackModule(LightningDataModule):
         if self.num_workers > 0:
             kwargs["persistent_workers"] = self.persistent_workers
 
-        is_iterable = isinstance(dataset, IterableDataset)
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            shuffle=shuffle if not is_iterable else False,
+            shuffle=shuffle,
             drop_last=drop_last,
             collate_fn=collate_fn,
             **kwargs,
@@ -225,10 +164,7 @@ class COCOATrackModule(LightningDataModule):
     def get_data_sample(self) -> dict:
         if not hasattr(self, "valid_set"):
             self.setup("validate")
-        ds = self.valid_set
-        if isinstance(ds, IterableDataset):
-            return next(iter(ds))
-        return ds[0]
+        return self.valid_set[0]
 
     def get_n_classes(self) -> int:
         return 1

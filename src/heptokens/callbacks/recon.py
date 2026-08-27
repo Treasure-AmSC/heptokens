@@ -25,12 +25,13 @@ class ReconstructionMonitor(Callback):
     def __init__(
         self,
         cst_fn: BaseEstimator,
-        jet_fn: BaseEstimator,
+        jet_fn: BaseEstimator | None = None,
         log_every_n_epochs: int = 1,
         max_batches: int = 1,
         pt_idx: int = 0,
         deta_idx: int = 1,
         dphi_idx: int = 2,
+        energy_idx: int | None = None,
         jet_pt_idx: int = 0,
         jet_mass_idx: int = 1,
         jet_eta_idx: int = 2,
@@ -49,6 +50,7 @@ class ReconstructionMonitor(Callback):
         self.pt_idx = pt_idx
         self.deta_idx = deta_idx
         self.dphi_idx = dphi_idx
+        self.energy_idx = energy_idx
         self.jet_pt_idx = jet_pt_idx
         self.jet_mass_idx = jet_mass_idx
         self.jet_eta_idx = jet_eta_idx
@@ -74,33 +76,38 @@ class ReconstructionMonitor(Callback):
         return (phi + np.pi) % (2 * np.pi) - np.pi
 
     # Add helper method to compute jets from constituents
-    def _compute_jet_from_constituents(self, csts, mask, jets):
-        """Compute jet pt from constituent pts (relative coordinates).
+    def _compute_jet_from_constituents(self, csts, mask, jets=None):
+        """Compute jet 4-vector from constituent pts, etas, phis.
 
-        Since constituents are in relative (deta, dphi) coordinates,
-        we only sum their pt values. The eta/phi are relative to jet axis,
-        so reconstructed jets have centroids at (0,0) in eta/phi space.
+        If jets is provided, constituent eta/phi are treated as relative (deta, dphi)
+        and offset by jet coordinates. If jets is None, constituent eta/phi are absolute.
 
         Args:
-            csts: [batch, n_constituents, features] where features are [pt, deta, dphi, ...]
+            csts: [batch, n_constituents, features] where features are [pt, eta/deta, phi/dphi, ...]
             mask: [batch_size, n_constituents] boolean mask of valid constituents
+            jets: optional [batch, jet_features] for relative coordinate offset
 
         Returns:
-            dict with jet pt (sum of constituent pts)
+            dict with jet pt, mass, eta, phi
         """
-        # Extract jet eta, phi
-        jet_etas = jets[:, self.jet_eta_idx].cpu().numpy()
-        jet_phis = jets[:, self.jet_phi_idx].cpu().numpy()
-
-        # assume csts masses are zero, so we can compute jet mass from constituent pts and jet pt
-        csts_pts = csts[:, :, self.pt_idx].cpu().numpy()
         csts_detas = csts[:, :, self.deta_idx].cpu().numpy()
         csts_dphis = csts[:, :, self.dphi_idx].cpu().numpy()
 
-        # add back jet coords to get absolute csts coords
-        csts_phis_unbounded = csts_dphis + jet_phis[:, None]
-        csts_phis = self._delta_phi(csts_phis_unbounded, 0.0)
-        csts_etas = csts_detas + jet_etas[:, None]
+        if jets is not None:
+            jet_etas = jets[:, self.jet_eta_idx].cpu().numpy()
+            jet_phis = jets[:, self.jet_phi_idx].cpu().numpy()
+            csts_phis = self._delta_phi(csts_dphis + jet_phis[:, None], 0.0)
+            csts_etas = csts_detas + jet_etas[:, None]
+        else:
+            csts_etas = csts_detas
+            csts_phis = csts_dphis
+
+        if self.energy_idx is not None:
+            # Massless calo clusters: pT = E / cosh(eta)
+            csts_energies = csts[:, :, self.energy_idx].cpu().numpy()
+            csts_pts = csts_energies / np.cosh(csts_etas)
+        else:
+            csts_pts = csts[:, :, self.pt_idx].cpu().numpy()
 
         pxs = csts_pts * np.cos(csts_phis)
         pys = csts_pts * np.sin(csts_phis)
@@ -147,9 +154,10 @@ class ReconstructionMonitor(Callback):
         # Create reconstruction dict in scaled space
         recon_dict_scaled = {
             "csts": recon_scaled,
-            "jets": batch["jets"].clone(),
             "mask": batch["mask"],
         }
+        if "jets" in batch:
+            recon_dict_scaled["jets"] = batch["jets"].clone()
 
         # Inverse transform
         original_unscaled = inverse_preprocess_batch(
@@ -191,11 +199,12 @@ class ReconstructionMonitor(Callback):
                 ),
             }
             """
+            jets_for_offset = original_unscaled.get("jets")
             jet_truth = self._compute_jet_from_constituents(
-                original_unscaled["csts"], mask, original_unscaled["jets"]
+                original_unscaled["csts"], mask, jets_for_offset
             )
             jet_reco = self._compute_jet_from_constituents(
-                recon_unscaled["csts"], mask, original_unscaled["jets"]
+                recon_unscaled["csts"], mask, jets_for_offset
             )
 
             # Compute pt residuals and radial distance

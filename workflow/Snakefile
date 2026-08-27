@@ -8,7 +8,11 @@ output_dir      = WORKSPACE / "results" / "long_run"
 scan_output_dir = WORKSPACE / "results" / "vqvae_scan"
 
 # ── SLURM settings ───────────────────────────────────────────────────────────
-SLURM = f"sbatch --wait -A mli:diffpg@ampere -p ampere -t 7000 --mem=100G --gres=gpu:1 -D {WORKSPACE}"
+# Account/partition are overridable, e.g.:
+#   --config slurm_account=atlas:compef@ampere slurm_partition=ampere
+SLURM_ACCOUNT = config.get("slurm_account", "mli:diffpg@ampere")
+SLURM_PARTITION = config.get("slurm_partition", "ampere")
+SLURM = f"sbatch --wait -A {SLURM_ACCOUNT} -p {SLURM_PARTITION} -t 7000 --mem=100G --gres=gpu:1 -D {WORKSPACE}"
 
 # ── Configurable suffix for ablation runs ─────────────────────────────────────
 # Usage: snakemake all_vqvae_scan --config suffix=_onlyptetaphi cst_features='[pt,deta,dphi]'
@@ -26,16 +30,16 @@ tokenizers = ["transformer_vqvae"]
 # ── Architecture sizes per model type ─────────────────────────────────────────
 # MLP encoder/decoder (vqvae)
 mlp_sizes = {
-    #"small":  "[64,128]",
+    "small":  "[64,128]",
     "medium": "[128,256,512]", #default
-    #"large":  "[256,512,1024]",
+    "large":  "[256,512,1024]",
 }
 
 # Transformer encoder/decoder (transformer_vqvae)
 transformer_sizes = {
-    #"small":  {"d_model": 64,  "n_heads": 4, "num_layers": 2, "dim_feedforward": 256},
+    "small":  {"d_model": 64,  "n_heads": 4, "num_layers": 2, "dim_feedforward": 256},
     "medium": {"d_model": 128, "n_heads": 8, "num_layers": 4, "dim_feedforward": 512}, #default
-    #"large":  {"d_model": 256, "n_heads": 8, "num_layers": 6, "dim_feedforward": 1024},
+    "large":  {"d_model": 256, "n_heads": 8, "num_layers": 6, "dim_feedforward": 1024},
 }
 
 arch_sizes = {
@@ -43,25 +47,39 @@ arch_sizes = {
     "transformer_vqvae": transformer_sizes,
 }
 
-# Residual VQ-VAE parameters
-codebook_sizes    = [8192, 16384, 32768]
-codebook_dims     = [4, 8]
-num_quantizers    = [4]
-learning_rates    = [0.001]
-commitment_weights = [1.0]
+# ── Model-type naming + learning rate (kept consistent with existing results) ─
+# Existing MLP runs are named bare `enc_<size>_...` at lr=1e-3; Transformer runs
+# are `transformer_vqvae_enc_<size>_...` at lr=3e-4 (verified against results/ and
+# scripts/compare_models.py). Preserve both conventions exactly so new runs sit
+# alongside — and are reused/compared with — the existing scan.
+model_prefix = {"vqvae": "", "transformer_vqvae": "transformer_vqvae_"}
+model_lr     = {"vqvae": 0.001, "transformer_vqvae": 0.0003}
 
-# Build list of scan config dicts so Snakemake can expand over them
+# ── Size × #training-events grid at the optimal RVQ operating point ───────────
+# Fixed VQ params = jet-resolution optimum (verified rank 1/30 over the transformer
+# grid): codebook_size=32768, codebook_dim=8, num_quantizers=4, commitment=1.0.
+# 2D scan over model size {small,medium,large} × training events {1M,10M,20M} for
+# both MLP (vqvae) and Transformer (transformer_vqvae) encoders = 18 configs; the
+# 4 already-trained transformer points are skipped via their existing SUCCESS.txt.
+SCAN_CB, SCAN_CD, SCAN_NQ, SCAN_CW = 32768, 8, 4, 1.0
+scan_sizes  = ["small", "medium", "large"]
+scan_n_jets = [1_000_000, 10_000_000, 20_000_000]
+scan_models = ["vqvae", "transformer_vqvae"]
+
 scan_configs = []
-for model in tokenizers:
-    for enc, cb, cd, nq, lr, cw, nj in product(
-        arch_sizes[model].keys(), codebook_sizes, codebook_dims,
-        num_quantizers, learning_rates, commitment_weights, n_jets,
-    ):
-        name = f"{model}_enc_{enc}_cb{cb}_cd{cd}_nq{nq}_lr{lr}_cw{cw}_nj{nj}{SUFFIX}"
-        scan_configs.append({
-            "model": model, "enc": enc, "cb": cb, "cd": cd, "nq": nq,
-            "lr": lr, "cw": cw, "nj": nj, "name": name,
-        })
+for model in scan_models:
+    lr = model_lr[model]
+    for enc in scan_sizes:
+        for nj in scan_n_jets:
+            name = (
+                f"{model_prefix[model]}enc_{enc}"
+                f"_cb{SCAN_CB}_cd{SCAN_CD}_nq{SCAN_NQ}"
+                f"_lr{lr}_cw{SCAN_CW}_nj{nj}{SUFFIX}"
+            )
+            scan_configs.append({
+                "model": model, "enc": enc, "cb": SCAN_CB, "cd": SCAN_CD,
+                "nq": SCAN_NQ, "lr": lr, "cw": SCAN_CW, "nj": nj, "name": name,
+            })
 
 # No filter needed — train_tokenizer creates new runs, test_tokenizer depends on SUCCESS.txt
 scan_names = [c["name"] for c in scan_configs]
@@ -379,6 +397,597 @@ rule test_vector_classifier:
                 datamodule.transforms.preprocess.cst_fn.filename='/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib'"
         """
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Token-based classifier (VectorClassifier trained directly on pre-exported tokens)
+# ══════════════════════════════════════════════════════════════════════════════
+# Trains VectorClassifier on the z_q reconstructed from pre-exported VQ-VAE tokens
+# (scripts/export_tokens.py). Unlike train_vector_classifier (which re-tokenizes raw
+# csts on the fly from atlas_mappable), this reads the .npz tokens directly via the
+# token_npz datamodule with model.tokenizer_ckpt=null — enabling training on the full
+# ~168M-jet "large" set without re-running the VQ-VAE encoder every epoch.
+TOKEN_NPZ_DIR = "/fs/ddn/sdf/group/atlas/d/jkrupa/heptokens/transformer_vqvae_enc_large_cb32768_cd8_nq4_lr0.0003_cw1.0_nj10000000"
+
+# size -> exported token .npz used for token-based classifier training
+token_clf_sizes = {
+    "large":  f"{TOKEN_NPZ_DIR}/mc-flavtag-ttbar-large.npz",
+    "medium": f"{TOKEN_NPZ_DIR}/mc-flavtag-ttbar-medium.npz",
+    "small":  f"{TOKEN_NPZ_DIR}/mc-flavtag-ttbar-small.npz",
+}
+# codebook_dim of the exported tokens (must match the tokenizer used at export time)
+TOKEN_CLF_CODEBOOK_DIM = 8
+# Default training length for the token classifier (overridable via --config)
+TOKEN_CLF_MAX_EPOCHS = config.get("token_clf_max_epochs", 30)
+
+rule all_token_classifiers:
+    input:
+        scan_output_dir / "classifiers/token_clf_large/SUCCESS.txt",
+
+rule all_token_classifier_tests:
+    input:
+        scan_output_dir / "classifiers/token_clf_large/TEST_SUCCESS.txt",
+
+# ── Extract mmap'd .npy sidecars once (bounded RAM; needed for the large .npz) ──
+rule extract_token_sidecars:
+    output:
+        marker = TOKEN_NPZ_DIR + "/mc-flavtag-ttbar-{size}_npy/EXTRACT_SUCCESS.txt",
+    params:
+        npz = lambda wc: token_clf_sizes[wc.size],
+        # Streaming extraction is RAM-light (~hundreds of MB); disk is the constraint
+        # (the large indices sidecar is ~54 GB), so request modest memory and short time.
+        slurm = f"sbatch --wait -A mli:diffpg@ampere -p ampere -t 2000 --mem=16G --gres=gpu:1 -D {WORKSPACE}",
+    wildcard_constraints:
+        size = "|".join(token_clf_sizes),
+    shell:
+        """
+        {params.slurm} -J extract_{wildcards.size} \
+            -o """ + TOKEN_NPZ_DIR + """/extract_{wildcards.size}_%j.log \
+            --wrap="pixi run python scripts/extract_token_sidecars.py {params.npz} \
+                && touch {output.marker}"
+        """
+
+rule train_token_classifier:
+    input:
+        sidecar = TOKEN_NPZ_DIR + "/mc-flavtag-ttbar-{size}_npy/EXTRACT_SUCCESS.txt",
+    output:
+        scan_output_dir / "classifiers/token_clf_{size}/SUCCESS.txt",
+        scan_output_dir / "classifiers/token_clf_{size}/checkpoints/best.ckpt",
+    params:
+        output_dir = scan_output_dir,
+        npz = lambda wc: token_clf_sizes[wc.size],
+        codebook_dim = TOKEN_CLF_CODEBOOK_DIM,
+        max_epochs = TOKEN_CLF_MAX_EPOCHS,
+        net_overrides = _clf_net_overrides(),
+        slurm = SLURM,
+    wildcard_constraints:
+        size = "|".join(token_clf_sizes),
+    shell:
+        """
+        {params.slurm} -J token_clf_{wildcards.size} \
+            -o {params.output_dir}/classifiers/token_clf_{wildcards.size}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=classifiers \
+                network_name=token_clf_{wildcards.size} \
+                datamodule=token_npz \
+                datamodule.data_path={params.npz} \
+                model=vector_classifier \
+                model.tokenizer_ckpt=null \
+                model.codebook_dim={params.codebook_dim} \
+                {params.net_overrides} \
+                trainer.max_epochs={params.max_epochs} \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.enable_progress_bar=false \
+                callbacks=classify"
+        """
+
+rule test_token_classifier:
+    input:
+        success = scan_output_dir / "classifiers/token_clf_{size}/SUCCESS.txt",
+        ckpt = scan_output_dir / "classifiers/token_clf_{size}/checkpoints/best.ckpt",
+        sidecar = TOKEN_NPZ_DIR + "/mc-flavtag-ttbar-{size}_npy/EXTRACT_SUCCESS.txt",
+    output:
+        scan_output_dir / "classifiers/token_clf_{size}/TEST_SUCCESS.txt",
+    params:
+        output_dir = scan_output_dir,
+        npz = lambda wc: token_clf_sizes[wc.size],
+        codebook_dim = TOKEN_CLF_CODEBOOK_DIM,
+        net_overrides = _clf_net_overrides(),
+        slurm = SLURM,
+    wildcard_constraints:
+        size = "|".join(token_clf_sizes),
+    shell:
+        """
+        {params.slurm} -J test_token_clf_{wildcards.size} \
+            -o {params.output_dir}/classifiers/token_clf_{wildcards.size}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=classifiers \
+                network_name=token_clf_{wildcards.size}/test \
+                datamodule=token_npz \
+                datamodule.data_path={params.npz} \
+                model=vector_classifier \
+                model.tokenizer_ckpt=null \
+                model.codebook_dim={params.codebook_dim} \
+                {params.net_overrides} \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=classify \
+                trainer.enable_progress_bar=false"
+        """
+
+# ── Combined full-dataset training (small + medium + large ≈ 200M jets) ───────
+# Trains one VectorClassifier on the union of all three token files. All files share
+# the same codebook (verified), are split independently with the same fractions, and
+# are interleaved + shuffle-buffered into one stream by the token_npz datamodule.
+TOKEN_CLF_FULL_SIZES = ["large", "medium", "small"]
+TOKEN_CLF_FULL_LIST = "[" + ",".join(token_clf_sizes[s] for s in TOKEN_CLF_FULL_SIZES) + "]"
+
+# Larger classifier network for the full ~200M-jet run (mirrors the "large" encoder
+# geometry). Kept separate from the shared clf_network so the smaller per-size and
+# baseline classifier rules are unaffected. Power-of-2 dims, ~11M params (head_dim 64).
+token_clf_full_network = {
+    "d_model": 512,
+    "n_heads": 8,
+    "num_layers": 5,
+    "dim_feedforward": 1024,
+}
+TOKEN_CLF_FULL_NET = " ".join(f"model.{k}={v}" for k, v in token_clf_full_network.items())
+# Extra CPUs for the token dataloader workers (on-the-fly z_q reconstruction is CPU-bound;
+# the base SLURM has no --cpus-per-task, which starves the GPU at num_workers>1).
+TOKEN_CLF_FULL_SLURM = f"sbatch --wait -A mli:diffpg@ampere -p ampere -t 7000 --mem=100G --gres=gpu:1 --cpus-per-task=16 -D {WORKSPACE}"
+
+# Optional suffix to fork a parallel run into its own output dir + wandb run WITHOUT
+# clobbering an in-progress job (e.g. `--config run_suffix=_v2`). Empty = default names.
+RUN_SUFFIX = config.get("run_suffix", "")
+
+rule all_token_classifier_full:
+    input:
+        scan_output_dir / f"classifiers/token_clf_full{RUN_SUFFIX}/SUCCESS.txt",
+
+rule all_token_classifier_full_test:
+    input:
+        scan_output_dir / "classifiers/token_clf_full/TEST_SUCCESS.txt",
+
+rule train_token_classifier_full:
+    input:
+        sidecars = expand(
+            TOKEN_NPZ_DIR + "/mc-flavtag-ttbar-{size}_npy/EXTRACT_SUCCESS.txt",
+            size=TOKEN_CLF_FULL_SIZES,
+        ),
+    output:
+        scan_output_dir / f"classifiers/token_clf_full{RUN_SUFFIX}/SUCCESS.txt",
+        scan_output_dir / f"classifiers/token_clf_full{RUN_SUFFIX}/checkpoints/best.ckpt",
+    params:
+        output_dir = scan_output_dir,
+        data_paths = TOKEN_CLF_FULL_LIST,
+        codebook_dim = TOKEN_CLF_CODEBOOK_DIM,
+        max_epochs = TOKEN_CLF_MAX_EPOCHS,
+        net_overrides = TOKEN_CLF_FULL_NET,
+        token_npz_dir = TOKEN_NPZ_DIR,
+        name = "token_clf_full" + RUN_SUFFIX,
+        slurm = TOKEN_CLF_FULL_SLURM,
+    shell:
+        # Stage the mmap'd token sidecars (~64 GB) to local NVMe /lscratch and point the
+        # datamodule at them via sidecar_root, so the random-access reads hit fast local
+        # disk instead of shared /fs/ddn (where scattered reads are the throughput wall).
+        # Data content is byte-identical; only the read location changes.
+        """
+        {params.slurm} -J {params.name} \
+            -o {params.output_dir}/classifiers/{params.name}/slurm_%j.log \
+            --wrap='
+                LOCAL=/lscratch/{params.name}_$$ && mkdir -p $LOCAL && \
+                trap "rm -rf $LOCAL" EXIT && \
+                echo "Staging token sidecars to $LOCAL ..." && \
+                cp -r {params.token_npz_dir}/mc-flavtag-ttbar-large_npy \
+                      {params.token_npz_dir}/mc-flavtag-ttbar-medium_npy \
+                      {params.token_npz_dir}/mc-flavtag-ttbar-small_npy $LOCAL/ && \
+                pixi run python scripts/train.py \
+                    output_dir={params.output_dir} \
+                    project_name=classifiers \
+                    network_name={params.name} \
+                    datamodule=token_npz \
+                    datamodule.data_paths={params.data_paths} \
+                    datamodule.sidecar_root=$LOCAL \
+                    model=vector_classifier \
+                    model.tokenizer_ckpt=null \
+                    model.codebook_dim={params.codebook_dim} \
+                    {params.net_overrides} \
+                    trainer.max_epochs={params.max_epochs} \
+                    trainer.gradient_clip_val=5.0 \
+                    model.scheduler.total_steps=$((136529 * {params.max_epochs})) \
+                    +trainer.num_sanity_val_steps=0 \
+                    trainer.enable_progress_bar=false \
+                    callbacks=classify'
+        """
+
+rule test_token_classifier_full:
+    input:
+        success = scan_output_dir / "classifiers/token_clf_full/SUCCESS.txt",
+        ckpt = scan_output_dir / "classifiers/token_clf_full/checkpoints/best.ckpt",
+        sidecars = expand(
+            TOKEN_NPZ_DIR + "/mc-flavtag-ttbar-{size}_npy/EXTRACT_SUCCESS.txt",
+            size=TOKEN_CLF_FULL_SIZES,
+        ),
+    output:
+        scan_output_dir / "classifiers/token_clf_full/TEST_SUCCESS.txt",
+    params:
+        output_dir = scan_output_dir,
+        data_paths = TOKEN_CLF_FULL_LIST,
+        codebook_dim = TOKEN_CLF_CODEBOOK_DIM,
+        net_overrides = TOKEN_CLF_FULL_NET,
+        slurm = SLURM,
+    shell:
+        """
+        {params.slurm} -J test_token_clf_full \
+            -o {params.output_dir}/classifiers/token_clf_full/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=classifiers \
+                network_name=token_clf_full/test \
+                datamodule=token_npz \
+                datamodule.data_paths={params.data_paths} \
+                model=vector_classifier \
+                model.tokenizer_ckpt=null \
+                model.codebook_dim={params.codebook_dim} \
+                {params.net_overrides} \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=classify \
+                trainer.enable_progress_bar=false"
+        """
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Generalized token export + "full" classifier training for ARBITRARY scan points
+# ══════════════════════════════════════════════════════════════════════════════
+# Generalizes the export/extract/train_token_classifier_full steps above (which are
+# hardcoded to one TOKEN_NPZ_DIR at a time, requiring a manual constant edit +
+# --config run_suffix=... per tokenizer) into wildcard-parametrized rules keyed by
+# {tok_model} (the vqvae_scan point name). New scan points just get added to
+# TOKEN_CLF_FULL_SCAN_POINTS below — no Snakefile edits needed per run.
+GROUP_TOKEN_DIR = "/fs/ddn/sdf/group/atlas/d/jkrupa/heptokens"
+
+def group_token_dir(tok_model):
+    return f"{GROUP_TOKEN_DIR}/{tok_model}"
+
+# label -> vqvae_scan point name. Add new scan points here.
+TOKEN_CLF_FULL_SCAN_POINTS = {
+    "cb1024_nq4": "transformer_vqvae_enc_large_cb1024_cd8_nq4_lr0.0003_cw1.0_nj10000000",
+    "cb8192_nq4": "transformer_vqvae_enc_large_cb8192_cd8_nq4_lr0.0003_cw1.0_nj10000000",
+    "cb1024_nq3": "transformer_vqvae_enc_large_cb1024_cd8_nq3_lr0.0003_cw1.0_nj10000000",
+}
+
+rule export_tokens_scan:
+    input:
+        ckpt = scan_output_dir / "vqvae_scan/{tok_model}/checkpoints/best.ckpt",
+    output:
+        GROUP_TOKEN_DIR + "/{tok_model}/mc-flavtag-ttbar-{split}.npz",
+    params:
+        h5_path = lambda wc: TOKENIZE_H5_FILES[wc.split],
+        output_dir = lambda wc: group_token_dir(wc.tok_model),
+        slurm = f"sbatch --wait -A mli:diffpg@ampere -p ampere -t 7000 --mem=100G --gres=gpu:1 --cpus-per-task=8 -D {WORKSPACE}",
+    wildcard_constraints:
+        tok_model = "[^/]+",
+        split = "small|medium|large",
+    shell:
+        """
+        mkdir -p {params.output_dir} && \
+        {params.slurm} -J export_{wildcards.tok_model}_{wildcards.split} \
+            -o {params.output_dir}/slurm_export_{wildcards.split}_%j.log \
+            --wrap='
+                LOCAL=/lscratch/export_$$ && mkdir -p $LOCAL && \
+                trap "rm -rf $LOCAL" EXIT && \
+                export LOCAL_TMPDIR=$LOCAL && \
+                echo "Copying {params.h5_path} to $LOCAL ..." && \
+                cp {params.h5_path} $LOCAL/ && \
+                LOCAL_H5=$LOCAL/$(basename {params.h5_path}) && \
+                echo "Running tokenization from $LOCAL_H5, tmp=$LOCAL_TMPDIR ..." && \
+                pixi run python scripts/export_tokens.py \
+                    ckpt_path={input.ckpt} \
+                    output_dir={params.output_dir} \
+                    datamodule.data_path=$LOCAL_H5 \
+                    datamodule.batch_size=2048 \
+                    datamodule.train_frac=0.0 \
+                    datamodule.val_frac=0.0 \
+                    datamodule.test_frac=1.0 \
+                    datamodule.seed=null \
+                    datamodule.chunk_size=5000000 \
+                    datamodule.num_workers=2 \
+                    datamodule.transforms.preprocess.cst_fn.filename=/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib \
+                    datamodule.transforms.preprocess.jet_fn.filename=/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib
+            '
+        """
+
+rule extract_token_sidecars_scan:
+    input:
+        npz = GROUP_TOKEN_DIR + "/{tok_model}/mc-flavtag-ttbar-{size}.npz",
+    output:
+        marker = GROUP_TOKEN_DIR + "/{tok_model}/mc-flavtag-ttbar-{size}_npy/EXTRACT_SUCCESS.txt",
+    params:
+        slurm = f"sbatch --wait -A mli:diffpg@ampere -p ampere -t 2000 --mem=16G --gres=gpu:1 -D {WORKSPACE}",
+        log_dir = lambda wc: group_token_dir(wc.tok_model),
+    wildcard_constraints:
+        tok_model = "[^/]+",
+        size = "small|medium|large",
+    shell:
+        """
+        {params.slurm} -J extract_{wildcards.tok_model}_{wildcards.size} \
+            -o {params.log_dir}/extract_{wildcards.size}_%j.log \
+            --wrap="pixi run python scripts/extract_token_sidecars.py {input.npz} \
+                && touch {output.marker}"
+        """
+
+rule all_token_classifier_full_scan:
+    input:
+        expand(scan_output_dir / "classifiers/token_clf_full_{label}/SUCCESS.txt",
+               label=TOKEN_CLF_FULL_SCAN_POINTS),
+
+rule train_token_classifier_full_scan:
+    input:
+        sidecars = lambda wc: expand(
+            group_token_dir(TOKEN_CLF_FULL_SCAN_POINTS[wc.label]) + "/mc-flavtag-ttbar-{size}_npy/EXTRACT_SUCCESS.txt",
+            size=TOKEN_CLF_FULL_SIZES,
+        ),
+    output:
+        scan_output_dir / "classifiers/token_clf_full_{label}/SUCCESS.txt",
+        scan_output_dir / "classifiers/token_clf_full_{label}/checkpoints/best.ckpt",
+    params:
+        output_dir = scan_output_dir,
+        token_npz_dir = lambda wc: group_token_dir(TOKEN_CLF_FULL_SCAN_POINTS[wc.label]),
+        data_paths = lambda wc: "[" + ",".join(
+            f"{group_token_dir(TOKEN_CLF_FULL_SCAN_POINTS[wc.label])}/mc-flavtag-ttbar-{s}.npz"
+            for s in TOKEN_CLF_FULL_SIZES
+        ) + "]",
+        codebook_dim = TOKEN_CLF_CODEBOOK_DIM,
+        max_epochs = TOKEN_CLF_MAX_EPOCHS,
+        net_overrides = TOKEN_CLF_FULL_NET,
+        name = lambda wc: "token_clf_full_" + wc.label,
+        slurm = TOKEN_CLF_FULL_SLURM,
+    wildcard_constraints:
+        label = "|".join(TOKEN_CLF_FULL_SCAN_POINTS),
+    shell:
+        """
+        {params.slurm} -J {params.name} \
+            -o {params.output_dir}/classifiers/{params.name}/slurm_%j.log \
+            --wrap='
+                LOCAL=/lscratch/{params.name}_$$ && mkdir -p $LOCAL && \
+                trap "rm -rf $LOCAL" EXIT && \
+                echo "Staging token sidecars to $LOCAL ..." && \
+                cp -r {params.token_npz_dir}/mc-flavtag-ttbar-large_npy \
+                      {params.token_npz_dir}/mc-flavtag-ttbar-medium_npy \
+                      {params.token_npz_dir}/mc-flavtag-ttbar-small_npy $LOCAL/ && \
+                pixi run python scripts/train.py \
+                    output_dir={params.output_dir} \
+                    project_name=classifiers \
+                    network_name={params.name} \
+                    datamodule=token_npz \
+                    datamodule.data_paths={params.data_paths} \
+                    datamodule.sidecar_root=$LOCAL \
+                    model=vector_classifier \
+                    model.tokenizer_ckpt=null \
+                    model.codebook_dim={params.codebook_dim} \
+                    {params.net_overrides} \
+                    trainer.max_epochs={params.max_epochs} \
+                    trainer.gradient_clip_val=5.0 \
+                    model.scheduler.total_steps=$((136529 * {params.max_epochs})) \
+                    +trainer.num_sanity_val_steps=0 \
+                    trainer.enable_progress_bar=false \
+                    callbacks=classify'
+        """
+
+rule test_token_classifier_full_scan:
+    input:
+        success = scan_output_dir / "classifiers/token_clf_full_{label}/SUCCESS.txt",
+        ckpt = scan_output_dir / "classifiers/token_clf_full_{label}/checkpoints/best.ckpt",
+        sidecars = lambda wc: expand(
+            group_token_dir(TOKEN_CLF_FULL_SCAN_POINTS[wc.label]) + "/mc-flavtag-ttbar-{size}_npy/EXTRACT_SUCCESS.txt",
+            size=TOKEN_CLF_FULL_SIZES,
+        ),
+    output:
+        scan_output_dir / "classifiers/token_clf_full_{label}/TEST_SUCCESS.txt",
+    params:
+        output_dir = scan_output_dir,
+        data_paths = lambda wc: "[" + ",".join(
+            f"{group_token_dir(TOKEN_CLF_FULL_SCAN_POINTS[wc.label])}/mc-flavtag-ttbar-{s}.npz"
+            for s in TOKEN_CLF_FULL_SIZES
+        ) + "]",
+        codebook_dim = TOKEN_CLF_CODEBOOK_DIM,
+        net_overrides = TOKEN_CLF_FULL_NET,
+        name = lambda wc: "token_clf_full_" + wc.label,
+        slurm = SLURM,
+    wildcard_constraints:
+        label = "|".join(TOKEN_CLF_FULL_SCAN_POINTS),
+    shell:
+        """
+        {params.slurm} -J test_{params.name} \
+            -o {params.output_dir}/classifiers/{params.name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=classifiers \
+                network_name={params.name}/test \
+                datamodule=token_npz \
+                datamodule.data_paths={params.data_paths} \
+                model=vector_classifier \
+                model.tokenizer_ckpt=null \
+                model.codebook_dim={params.codebook_dim} \
+                {params.net_overrides} \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=classify \
+                trainer.limit_val_batches=1.0 \
+                trainer.enable_progress_bar=false"
+        """
+
+# ── ROC comparison: cb1024/cb8192 scan points vs existing references ────────
+# Compares the full-test-set predictions.npz of the 3 new token_clf_full_{label}
+# scan points against the pre-existing token_clf_full_v2 (medium-encoder token
+# classifier) and feature_clf_full_v3 (raw-feature baseline) runs. Those two
+# reference runs saved their FULL-test-set predictions under test_full/ (their
+# test/ holds an earlier, 512k-jet-truncated run) — scripts/compare_roc.py's
+# --from_predictions loader checks "{run_dir}/test/test_predictions/predictions.npz"
+# then falls back to "{run_dir}/predictions.npz", so pointing run_dir directly at
+# the .../test_full/test_predictions folder makes it pick up the right file via
+# that fallback.
+COMPARE_ROC_SCAN_LABELS = ["cb1024_nq3", "cb1024_nq4", "cb8192_nq4"]
+COMPARE_ROC_REFS = {
+    "token_clf_full_v2": scan_output_dir / "classifiers/token_clf_full_v2/test_full/test_predictions",
+    "feature_clf_full_v3": scan_output_dir / "classifiers/feature_clf_full_v3/test_full/test_predictions",
+}
+roc_scan_output_dir = scan_output_dir / "roc_comparison_scan"
+
+rule compare_roc_scan:
+    input:
+        scan_preds = expand(
+            scan_output_dir / "classifiers/token_clf_full_{label}/test/test_predictions/predictions.npz",
+            label=COMPARE_ROC_SCAN_LABELS,
+        ),
+        ref_preds = [p / "predictions.npz" for p in COMPARE_ROC_REFS.values()],
+    output:
+        auc_csv = roc_scan_output_dir / "token_clf_scan_vs_refs_auc.csv",
+        btag_roc = roc_scan_output_dir / "token_clf_scan_vs_refs_btag_roc.pdf",
+        ovr_roc = roc_scan_output_dir / "token_clf_scan_vs_refs_ovr_roc.pdf",
+    params:
+        run_dirs = " ".join(
+            [str(scan_output_dir / f"classifiers/token_clf_full_{label}") for label in COMPARE_ROC_SCAN_LABELS]
+            + [str(p) for p in COMPARE_ROC_REFS.values()]
+        ),
+        run_labels = " ".join(COMPARE_ROC_SCAN_LABELS + list(COMPARE_ROC_REFS.keys())),
+        output_dir = roc_scan_output_dir,
+        output_name = "token_clf_scan_vs_refs",
+    shell:
+        """
+        pixi run python scripts/compare_roc.py \
+            --from_predictions \
+            --run_dirs {params.run_dirs} \
+            --run_labels {params.run_labels} \
+            --output_dir {params.output_dir} \
+            --output_name {params.output_name}
+        """
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Combined full-dataset FEATURE classifier baseline (from scratch, ~200M jets)
+# ══════════════════════════════════════════════════════════════════════════════
+# Raw-feature counterpart to token_clf_full: trains a FeatureClassifier FROM SCRATCH on
+# the union of the small+medium+large h5 files (~200M jets), streamed + interleaved +
+# shuffle-buffered by the new MultiFileIterModule (datamodule=atlas_iterable_multi). Each
+# file is split independently with the same seed=42 fractions, so the combined 70/15/15
+# split is preserved and the held-out 15% test split is reproducible.
+#
+# Model size MATCHES token_clf_full: we reuse the exact token_clf_full geometry
+# (d_model512/n_heads8/num_layers5/dim_feedforward1024). At that geometry the
+# FeatureClassifier is 11,052,036 params vs token_clf_full's VectorClassifier 11,045,892
+# (diff 6,144 = 0.06%). NO warm-start (the previous feature_clf 128/8/4/512 weights are
+# incompatible and unused) — training starts from random init.
+#
+# Data: the COMPLETE large h5 (168,495,316 jets) under /sdf/data plus medium+small. The
+# /sdf/scratch large copy is TRUNCATED/corrupt and must NOT be used.
+#
+# IO/STAGING decision: the three files total ~107 GB (large 90 + medium 14 + small 3) and
+# /lscratch shows only ~107 GB free (compute-node capacity uncertain, and token_clf_full
+# is concurrently using scratch). That is NOT clearly >130 GB, so we do NOT stage to local
+# NVMe — we read directly from the shared FS and rely on num_workers=8 (the SLURM alloc
+# already requests --cpus-per-task=8). Correctness > speed.
+
+# Reuse token_clf_full's network geometry verbatim so the param count matches.
+FEATURE_CLF_FULL_NET = TOKEN_CLF_FULL_NET
+# Default training length (overridable via --config feature_clf_full_max_epochs=N).
+FEATURE_CLF_FULL_MAX_EPOCHS = config.get("feature_clf_full_max_epochs", 30)
+# SLURM with extra CPUs for the streaming dataloader workers (mirrors tokenize_dataset).
+FEATURE_CLF_FULL_SLURM = f"sbatch --wait -A mli:diffpg@ampere -p ampere -t 7000 --mem=100G --gres=gpu:1 --cpus-per-task=8 -D {WORKSPACE}"
+
+rule all_feature_classifier_full:
+    input:
+        scan_output_dir / f"classifiers/feature_clf_full{RUN_SUFFIX}/SUCCESS.txt",
+
+rule all_feature_classifier_full_test:
+    input:
+        scan_output_dir / "classifiers/feature_clf_full/TEST_SUCCESS.txt",
+
+rule train_feature_classifier_full:
+    output:
+        scan_output_dir / f"classifiers/feature_clf_full{RUN_SUFFIX}/SUCCESS.txt",
+        scan_output_dir / f"classifiers/feature_clf_full{RUN_SUFFIX}/checkpoints/best.ckpt",
+    params:
+        output_dir = scan_output_dir,
+        net_overrides = FEATURE_CLF_FULL_NET,
+        max_epochs = FEATURE_CLF_FULL_MAX_EPOCHS,
+        name = "feature_clf_full" + RUN_SUFFIX,
+        slurm = FEATURE_CLF_FULL_SLURM,
+    shell:
+        # From scratch (no ckpt/weight warm-start). Stage the 90 GB complete large h5 to
+        # local NVMe (/lscratch) for fast random reads, then override data_paths so large
+        # is read from $LOCAL and medium+small (~17 GB) stream from the shared FS.
+        # HDF5_USE_FILE_LOCKING=FALSE: the medium/small h5 live on shared /sdf/scratch, and
+        # HDF5's read lock can abort() (SIGABRT) when many workers open them concurrently
+        # (train + validation). Reads are read-only, so disabling the lock is safe.
+        """
+        {params.slurm} -J {params.name} \
+            -o {params.output_dir}/classifiers/{params.name}/slurm_%j.log \
+            --wrap='
+                export HDF5_USE_FILE_LOCKING=FALSE && \
+                LOCAL=/lscratch/{params.name}_$$ && mkdir -p $LOCAL && \
+                trap "rm -rf $LOCAL" EXIT && \
+                echo "Staging large h5 to $LOCAL ..." && \
+                cp /sdf/data/atlas/u/jkrupa/mc-flavtag-ttbar-large.h5 $LOCAL/ && \
+                pixi run python scripts/train.py \
+                    output_dir={params.output_dir} \
+                    project_name=classifiers \
+                    network_name={params.name} \
+                    datamodule=atlas_iterable_multi \
+                    datamodule.data_paths=[$LOCAL/mc-flavtag-ttbar-large.h5,/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-medium.h5,/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-small.h5] \
+                    datamodule.num_workers=8 \
+                    datamodule.num_csts=40 \
+                    model=feature_classifier \
+                    {params.net_overrides} \
+                    trainer.max_epochs={params.max_epochs} \
+                    trainer.gradient_clip_val=5.0 \
+                    model.scheduler.total_steps=$((136529 * {params.max_epochs})) \
+                    +trainer.num_sanity_val_steps=0 \
+                    trainer.enable_progress_bar=false \
+                    callbacks=classify \
+                    datamodule.transforms.preprocess.jet_fn.filename=/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib \
+                    datamodule.transforms.preprocess.cst_fn.filename=/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib'
+        """
+
+rule test_feature_classifier_full:
+    input:
+        success = scan_output_dir / "classifiers/feature_clf_full/SUCCESS.txt",
+        ckpt = scan_output_dir / "classifiers/feature_clf_full/checkpoints/best.ckpt",
+    output:
+        scan_output_dir / "classifiers/feature_clf_full/TEST_SUCCESS.txt",
+    params:
+        output_dir = scan_output_dir,
+        net_overrides = FEATURE_CLF_FULL_NET,
+        slurm = FEATURE_CLF_FULL_SLURM,
+    shell:
+        # test_only=true: evaluate the held-out 15% combined test split (same data_paths,
+        # seed=42 + fractions => the held-out portion across all three files). Stage the
+        # large h5 to local NVMe for fast reads, same as the train rule.
+        """
+        {params.slurm} -J test_feature_clf_full \
+            -o {params.output_dir}/classifiers/feature_clf_full/slurm_test_%j.log \
+            --wrap='
+                LOCAL=/lscratch/test_feature_clf_full_$$ && mkdir -p $LOCAL && \
+                trap "rm -rf $LOCAL" EXIT && \
+                echo "Staging large h5 to $LOCAL ..." && \
+                cp /sdf/data/atlas/u/jkrupa/mc-flavtag-ttbar-large.h5 $LOCAL/ && \
+                pixi run python scripts/train.py \
+                    output_dir={params.output_dir} \
+                    project_name=classifiers \
+                    network_name=feature_clf_full/test \
+                    datamodule=atlas_iterable_multi \
+                    datamodule.data_paths=[$LOCAL/mc-flavtag-ttbar-large.h5,/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-medium.h5,/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-small.h5] \
+                    datamodule.num_workers=8 \
+                    datamodule.num_csts=40 \
+                    model=feature_classifier \
+                    {params.net_overrides} \
+                    ckpt_path={input.ckpt} \
+                    test_only=true \
+                    callbacks=classify \
+                    trainer.enable_progress_bar=false \
+                    datamodule.transforms.preprocess.jet_fn.filename=/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib \
+                    datamodule.transforms.preprocess.cst_fn.filename=/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib'
+        """
+
 # ── Hybrid VQ-VAE (MLP encoder + Transformer decoder) ────────────────────────
 HYBRID_NAME = "hybrid_vqvae_enc_large_cb32768_cd8_nq4_lr0.0003_cw1.0_nj10000000"
 
@@ -430,7 +1039,7 @@ rule train_hybrid_vqvae:
 TOKENIZE_H5_FILES = {
     "small":  "/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-small.h5",
     "medium": "/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-medium.h5",
-    "large":  "/sdf/data/atlas/u/jkrupa/mc-flavtag-ttbar-large.h5",
+    "large":  "/fs/ddn/sdf/group/atlas/d/jkrupa/mc-flavtag-ttbar-large.h5",
 }
 
 # Which VQ-VAE(s) to tokenize with (must be trained scan points)
@@ -440,6 +1049,460 @@ TOKENIZE_MODELS = [
 
 ]
 
+# ══════════════════════════════════════════════════════════════════════════════
+# COCOA Track Tokenization
+# ══════════════════════════════════════════════════════════════════════════════
+COCOA_DATA_DIR = "/fs/ddn/sdf/group/atlas/d/jkrupa/treasure/4m/data_new/COCOA_samples_singlejet"
+COCOA_CST_FN = f"{WORKSPACE}/resources/cocoa_cst_log_standard.joblib"
+cocoa_output_dir = WORKSPACE / "results" / "cocoa_scan"
+
+# ── COCOA scan grid ──────────────────────────────────────────────────────────
+cocoa_codebook_sizes = [64, 256, 1024, 4096]
+cocoa_codebook_dims = [2, 4, 8]
+cocoa_num_quantizers = [2, 3, 4]
+cocoa_learning_rates = [0.001]
+cocoa_encoder_size = {
+    "d_model": 128, "n_heads": 8, "num_layers": 4, "dim_feedforward": 512,
+}
+
+cocoa_scan_configs = []
+for cb, cd, nq, lr in product(
+    cocoa_codebook_sizes, cocoa_codebook_dims, cocoa_num_quantizers, cocoa_learning_rates,
+):
+    name = f"cocoa_tracks_cb{cb}_cd{cd}_nq{nq}_lr{lr}"
+    cocoa_scan_configs.append({"cb": cb, "cd": cd, "nq": nq, "lr": lr, "name": name})
+
+cocoa_scan_names = [c["name"] for c in cocoa_scan_configs]
+cocoa_scan_lookup = {c["name"]: c for c in cocoa_scan_configs}
+
+rule all_cocoa_tracks:
+    input:
+        expand(cocoa_output_dir / "tracks/{cocoa_name}/SUCCESS.txt", cocoa_name=cocoa_scan_names),
+
+rule train_cocoa_tracks:
+    output:
+        cocoa_output_dir / "tracks/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "tracks/{cocoa_name}/checkpoints/best.ckpt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_scan_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_scan_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_scan_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_scan_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_scan_names),
+    shell:
+        """
+        {params.slurm} -J {wildcards.cocoa_name} \
+            -o {params.output_dir}/tracks/{wildcards.cocoa_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=tracks \
+                network_name={wildcards.cocoa_name} \
+                model=transformer_vqvae \
+                datamodule=cocoa_tracks \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=null \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                model.optimizer.lr={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                trainer.max_epochs=50 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode_cocoa \
+                callbacks.early_stopping.patience=15 \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_CST_FN}"
+        """
+
+rule all_cocoa_tracks_test:
+    input:
+        expand(cocoa_output_dir / "tracks/{cocoa_name}/TEST_SUCCESS.txt", cocoa_name=cocoa_scan_names),
+
+rule test_cocoa_tracks:
+    input:
+        success = cocoa_output_dir / "tracks/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "tracks/{cocoa_name}/checkpoints/best.ckpt",
+    output:
+        cocoa_output_dir / "tracks/{cocoa_name}/TEST_SUCCESS.txt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_scan_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_scan_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_scan_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_scan_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_scan_names),
+    shell:
+        """
+        {params.slurm} -J test_{wildcards.cocoa_name} \
+            -o {params.output_dir}/tracks/{wildcards.cocoa_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=tracks \
+                network_name={wildcards.cocoa_name}/test \
+                model=transformer_vqvae \
+                datamodule=cocoa_tracks \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=null \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=encode_cocoa \
+                callbacks.reconstruction_monitor.compute_jet_metrics=true \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_CST_FN}"
+        """
+
+# ── COCOA plots ──────────────────────────────────────────────────────────────
+rule cocoa_tracks_plots:
+    input:
+        expand(cocoa_output_dir / "tracks/{cocoa_name}/TEST_SUCCESS.txt", cocoa_name=cocoa_scan_names),
+    output:
+        cocoa_output_dir / "plots/cocoa_jet_pt_resolution_vs_pt.pdf",
+        cocoa_output_dir / "plots/cocoa_scan_heatmap.pdf",
+        cocoa_output_dir / "plots/cocoa_mae_vs_cb_size.pdf",
+    params:
+        scan_dir = cocoa_output_dir / "tracks",
+        output_dir = cocoa_output_dir / "plots",
+    shell:
+        """
+        pixi run python scripts/compare_cocoa_scan.py \
+            --scan_dir {params.scan_dir} \
+            --output_dir {params.output_dir}
+        """
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COCOA Topo Cluster Tokenization
+# ══════════════════════════════════════════════════════════════════════════════
+COCOA_TOPO_CST_FN = f"{WORKSPACE}/resources/cocoa_topo_log_standard.joblib"
+
+# Topos keep improving in codebook_dim (unlike tracks, which saturate at cd=4),
+# so the topo dim grid is extended to probe where it saturates.
+cocoa_topo_codebook_dims = [2, 4, 8, 12]
+
+cocoa_topo_scan_configs = []
+for cb, cd, nq, lr in product(
+    cocoa_codebook_sizes, cocoa_topo_codebook_dims, cocoa_num_quantizers, cocoa_learning_rates,
+):
+    name = f"cocoa_topos_cb{cb}_cd{cd}_nq{nq}_lr{lr}"
+    cocoa_topo_scan_configs.append({"cb": cb, "cd": cd, "nq": nq, "lr": lr, "name": name})
+
+cocoa_topo_scan_names = [c["name"] for c in cocoa_topo_scan_configs]
+cocoa_topo_scan_lookup = {c["name"]: c for c in cocoa_topo_scan_configs}
+
+rule all_cocoa_topos:
+    input:
+        expand(cocoa_output_dir / "topos/{cocoa_name}/SUCCESS.txt", cocoa_name=cocoa_topo_scan_names),
+
+rule train_cocoa_topos:
+    output:
+        cocoa_output_dir / "topos/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "topos/{cocoa_name}/checkpoints/best.ckpt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_topo_scan_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_topo_scan_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_topo_scan_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_topo_scan_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_topo_scan_names),
+    shell:
+        """
+        {params.slurm} -J {wildcards.cocoa_name} \
+            -o {params.output_dir}/topos/{wildcards.cocoa_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=topos \
+                network_name={wildcards.cocoa_name} \
+                model=transformer_vqvae \
+                datamodule=cocoa_topos \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=5000000 \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                model.optimizer.lr={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                trainer.max_epochs=50 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode_cocoa \
+                callbacks.early_stopping.patience=15 \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_TOPO_CST_FN}"
+        """
+
+rule all_cocoa_topos_test:
+    input:
+        expand(cocoa_output_dir / "topos/{cocoa_name}/TEST_SUCCESS.txt", cocoa_name=cocoa_topo_scan_names),
+
+rule test_cocoa_topos:
+    input:
+        success = cocoa_output_dir / "topos/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "topos/{cocoa_name}/checkpoints/best.ckpt",
+    output:
+        cocoa_output_dir / "topos/{cocoa_name}/TEST_SUCCESS.txt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_topo_scan_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_topo_scan_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_topo_scan_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_topo_scan_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_topo_scan_names),
+    shell:
+        """
+        {params.slurm} -J test_{wildcards.cocoa_name} \
+            -o {params.output_dir}/topos/{wildcards.cocoa_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=topos \
+                network_name={wildcards.cocoa_name}/test \
+                model=transformer_vqvae \
+                datamodule=cocoa_topos \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=100000 \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=encode_cocoa \
+                callbacks.reconstruction_monitor.compute_jet_metrics=true \
+                +callbacks.reconstruction_monitor.deta_idx=0 \
+                +callbacks.reconstruction_monitor.dphi_idx=1 \
+                +callbacks.reconstruction_monitor.energy_idx=2 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_TOPO_CST_FN}"
+        """
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COCOA Truth-Particle Tokenization
+# ══════════════════════════════════════════════════════════════════════════════
+# Continuous features (fixed in heptokens.data.cocoa_truthpart): pt=0, eta=1,
+# phi=2, e=3, so the ReconstructionMonitor default pt/deta/dphi indices (0/1/2)
+# apply. The 3-way particle class (charged/neutral-hadron/photon) is carried as a
+# separate integer `class_labels` channel and handled by the model's categorical
+# head (embedding on input, cross-entropy on output, argmax to decode).
+COCOA_TRUTHPART_CST_FN = f"{WORKSPACE}/resources/cocoa_truthpart_log_standard.joblib"
+COCOA_TRUTHPART_MAX_CSTS = 16
+COCOA_TRUTHPART_NUM_CLASSES = 3
+COCOA_TRUTHPART_CLASS_EMBED_DIM = 8
+
+# Single operating point (list-based so this trivially extends to a scan later).
+cocoa_truthpart_codebook_sizes = [128]
+cocoa_truthpart_codebook_dims = [8]
+cocoa_truthpart_num_quantizers = [3]
+cocoa_truthpart_learning_rates = [0.001]
+
+cocoa_truthpart_scan_configs = []
+for cb, cd, nq, lr in product(
+    cocoa_truthpart_codebook_sizes,
+    cocoa_truthpart_codebook_dims,
+    cocoa_truthpart_num_quantizers,
+    cocoa_truthpart_learning_rates,
+):
+    name = f"cocoa_truthpart_cb{cb}_cd{cd}_nq{nq}_lr{lr}"
+    cocoa_truthpart_scan_configs.append({"cb": cb, "cd": cd, "nq": nq, "lr": lr, "name": name})
+
+cocoa_truthpart_scan_names = [c["name"] for c in cocoa_truthpart_scan_configs]
+cocoa_truthpart_scan_lookup = {c["name"]: c for c in cocoa_truthpart_scan_configs}
+
+rule cocoa_truthpart_scaler:
+    output:
+        COCOA_TRUTHPART_CST_FN,
+    shell:
+        """
+        pixi run python scripts/fit_cocoa_truthpart_scaler.py \
+            --data_dir {COCOA_DATA_DIR} \
+            --max_csts {COCOA_TRUTHPART_MAX_CSTS} \
+            --output {COCOA_TRUTHPART_CST_FN}
+        """
+
+rule all_cocoa_truthpart:
+    input:
+        expand(cocoa_output_dir / "truthpart/{cocoa_name}/SUCCESS.txt", cocoa_name=cocoa_truthpart_scan_names),
+
+rule train_cocoa_truthpart:
+    input:
+        cst_fn = ancient(COCOA_TRUTHPART_CST_FN),
+    output:
+        cocoa_output_dir / "truthpart/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "truthpart/{cocoa_name}/checkpoints/best.ckpt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_truthpart_scan_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_truthpart_scan_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_truthpart_scan_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_truthpart_scan_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_truthpart_scan_names),
+    shell:
+        """
+        {params.slurm} -J {wildcards.cocoa_name} \
+            -o {params.output_dir}/truthpart/{wildcards.cocoa_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=truthpart \
+                network_name={wildcards.cocoa_name} \
+                model=transformer_vqvae \
+                datamodule=cocoa_truthpart \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.max_csts={COCOA_TRUTHPART_MAX_CSTS} \
+                datamodule.num_events=5000000 \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                model.optimizer.lr={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                +model.num_classes={COCOA_TRUTHPART_NUM_CLASSES} \
+                +model.class_embed_dim={COCOA_TRUTHPART_CLASS_EMBED_DIM} \
+                trainer.max_epochs=50 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode_cocoa \
+                callbacks.early_stopping.patience=15 \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_TRUTHPART_CST_FN}"
+        """
+
+rule all_cocoa_truthpart_test:
+    input:
+        expand(cocoa_output_dir / "truthpart/{cocoa_name}/TEST_SUCCESS.txt", cocoa_name=cocoa_truthpart_scan_names),
+
+rule test_cocoa_truthpart:
+    input:
+        success = cocoa_output_dir / "truthpart/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "truthpart/{cocoa_name}/checkpoints/best.ckpt",
+    output:
+        cocoa_output_dir / "truthpart/{cocoa_name}/TEST_SUCCESS.txt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_truthpart_scan_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_truthpart_scan_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_truthpart_scan_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_truthpart_scan_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_truthpart_scan_names),
+    shell:
+        """
+        {params.slurm} -J test_{wildcards.cocoa_name} \
+            -o {params.output_dir}/truthpart/{wildcards.cocoa_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=truthpart \
+                network_name={wildcards.cocoa_name}/test \
+                model=transformer_vqvae \
+                datamodule=cocoa_truthpart \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.max_csts={COCOA_TRUTHPART_MAX_CSTS} \
+                datamodule.num_events=100000 \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                +model.num_classes={COCOA_TRUTHPART_NUM_CLASSES} \
+                +model.class_embed_dim={COCOA_TRUTHPART_CLASS_EMBED_DIM} \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=encode_cocoa \
+                callbacks.reconstruction_monitor.compute_jet_metrics=true \
+                +callbacks.reconstruction_monitor.energy_idx=3 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_TRUTHPART_CST_FN}"
+        """
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JetSet Dataset Tokenization (existing)
+# ══════════════════════════════════════════════════════════════════════════════
 rule tokenize_all:
     input:
         expand(

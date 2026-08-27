@@ -1,5 +1,5 @@
 ---
-_target_: heptokens.data.cocoa_tracks.COCOATrackModule
+_target_: heptokens.data.cocoa_truthpart.COCOATruthPartModule
 
 # Data directory containing train/val/test subdirectories
 data_dir: /fs/ddn/sdf/group/atlas/d/jkrupa/treasure/4m/data_new/COCOA_samples_singlejet
@@ -7,25 +7,24 @@ train_dir: train_topup2_20M_cells256
 val_dir: val_100K_cells256
 test_dir: test_1M_cells256_isInfFalse
 
-# Track features to use
+# Continuous truth-particle features (order fixes recon indices: pt=0, eta=1, phi=2, e=3).
+# The 3-way particle class (charged/neutral-hadron/photon) is emitted separately
+# as an integer `class_labels` channel and consumed by the model's categorical head.
 features:
-  - track_pt
-  - track_eta
-  - track_phi
-  - track_d0
-  - track_z0
+  - particle_pt
+  - particle_eta
+  - particle_phi
+  - particle_e
 
-# Maximum tracks per event (pad/truncate)
-max_csts: 15
+# Maximum truth particles per event (pad/truncate). Multiplicity is small
+# (median ~6, 99th percentile ~15).
+max_csts: 16
 
 # DataLoader settings
 batch_size: 1024
 num_workers: 4
 pin_memory: true
 persistent_workers: true
-
-# Use streaming (iterable) or in-memory (mappable) dataset
-streaming: false
 
 # Optional: limit number of events loaded per split
 num_events:
@@ -37,4 +36,4 @@ transforms:
     _partial_: true
     cst_fn:
       _target_: joblib.load
-      filename: /sdf/data/atlas/u/jkrupa/heptokens/resources/cocoa_cst_log_standard.joblib
+      filename: /sdf/data/atlas/u/jkrupa/heptokens/resources/cocoa_truthpart_log_standard.joblib

@@ -33,3 +33,14 @@ share/python-wheels/
 # Plots and other results
 plot/
 results/
+# Standalone model handoff repo (has its own .git)
+jetset_standalone/
+
+*log
+*out
+*pdf
+*png
+*txt
+*jpg
+*joblib
+paper/

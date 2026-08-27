@@ -72,32 +72,36 @@ class VqvaeTokenizer:
 def preprocess_batch(
     jet_dict: dict[T.Tensor],
     cst_fn: BaseEstimator,
-    jet_fn: BaseEstimator,
+    jet_fn: BaseEstimator | None = None,
 ) -> dict:
-    """Preprocess a batch of jets already stored as pytorch tensors."""
+    """Preprocess a batch of jets already stored as pytorch tensors.
+
+    If jet_fn is None, only constituent features are transformed.
+    """
     csts = jet_dict["csts"]
     mask = jet_dict["mask"]
-    jets = jet_dict["jets"]
 
     # Convert to numpy for sklearn
     csts_np = csts.cpu().numpy() if isinstance(csts, T.Tensor) else csts
-    jets_np = jets.cpu().numpy() if isinstance(jets, T.Tensor) else jets
+    mask_np = mask.cpu().numpy() if isinstance(mask, T.Tensor) else mask
 
-    # Pad and transform
+    # Pad and transform constituents
     if (feat_diff := cst_fn.n_features_in_ - csts_np.shape[-1]) > 0:
         zeros = np.zeros((csts_np.shape[:-1] + (feat_diff,)), dtype=csts_np.dtype)
         csts_np = np.concatenate((csts_np, zeros), axis=-1)
 
-    csts_np[mask.cpu().numpy() if isinstance(mask, T.Tensor) else mask] = cst_fn.transform(
-        csts_np[mask.cpu().numpy() if isinstance(mask, T.Tensor) else mask]
-    )
+    csts_np[mask_np] = cst_fn.transform(csts_np[mask_np])
 
     if feat_diff > 0:
         csts_np = csts_np[..., :-feat_diff]
 
-    # Convert back to tensor
     jet_dict["csts"] = T.from_numpy(csts_np).float()
-    jet_dict["jets"] = T.from_numpy(jet_fn.transform(jets_np)).float()
+
+    # Transform jets if jet_fn provided
+    if jet_fn is not None and "jets" in jet_dict:
+        jets = jet_dict["jets"]
+        jets_np = jets.cpu().numpy() if isinstance(jets, T.Tensor) else jets
+        jet_dict["jets"] = T.from_numpy(jet_fn.transform(jets_np)).float()
 
     return jet_dict
 
@@ -105,24 +109,15 @@ def preprocess_batch(
 def inverse_preprocess_batch(
     jet_dict: dict[T.Tensor],
     cst_fn: BaseEstimator,
-    jet_fn: BaseEstimator,
+    jet_fn: BaseEstimator | None = None,
 ) -> dict:
     """Apply inverse preprocessing to a batch of jets.
 
-    Args:
-        jet_dict: Dictionary containing 'csts', 'jets', and 'mask' tensors
-        cst_fn: Fitted QuantileTransformer for constituents
-        jet_fn: Fitted QuantileTransformer for jets
-
-    Returns:
-        Dictionary with inverse-transformed constituents and jets
+    If jet_fn is None, only constituent features are inverse-transformed.
     """
-    csts = jet_dict["csts"].clone()  # Clone to avoid modifying original
+    csts = jet_dict["csts"].clone()
     mask = jet_dict["mask"]
-    jets = jet_dict["jets"].clone()
 
-    # Inverse transform constituents
-    # Only transform valid (masked) constituents
     if mask.any():
         valid_csts = csts[mask].cpu().numpy()
         feat_diff = cst_fn.n_features_in_ - valid_csts.shape[-1]
@@ -134,14 +129,13 @@ def inverse_preprocess_batch(
             inverse_csts = inverse_csts[:, :-feat_diff]
         csts[mask] = T.from_numpy(inverse_csts).float()
 
-    # Inverse transform jets
-    inverse_jets = jet_fn.inverse_transform(jets.cpu().numpy())
-    jets = T.from_numpy(inverse_jets).float()
-
-    # Update dictionary
     jet_dict_inverse = jet_dict.copy()
     jet_dict_inverse["csts"] = csts
-    jet_dict_inverse["jets"] = jets
+
+    if jet_fn is not None and "jets" in jet_dict:
+        jets = jet_dict["jets"].clone()
+        inverse_jets = jet_fn.inverse_transform(jets.cpu().numpy())
+        jet_dict_inverse["jets"] = T.from_numpy(inverse_jets).float()
 
     return jet_dict_inverse
 

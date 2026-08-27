@@ -35,6 +35,7 @@ import argparse
 import csv
 import gc
 import logging
+import re
 from pathlib import Path
 
 import h5py
@@ -42,6 +43,7 @@ import hydra.utils as hu
 import matplotlib.pyplot as plt
 import numpy as np
 import torch as T
+from matplotlib.lines import Line2D
 from omegaconf import DictConfig, OmegaConf
 from sklearn.metrics import auc, roc_curve
 
@@ -302,8 +304,97 @@ def save_auc_csv(rows: AUCRows, path: Path) -> None:
 # Plotting
 # ---------------------------------------------------------------------------
 
-# Auto-cycling line styles for an arbitrary number of runs
-LINE_STYLES = ["-", "--", ":", "-.", (0, (3, 1, 1, 1)), (0, (5, 2)), (0, (1, 1))]
+# Line styles ordered from most dashed (most compressed / smallest codebook)
+# to fully solid (least compressed / continuous features). Runs are assumed
+# to be passed in --run_labels in order from most to least compressed, so the
+# *last* run always gets the solid line.
+LINE_STYLES = [
+    (0, (1, 1)),
+    (0, (2, 1)),
+    (0, (4, 1, 1, 1)),
+    ":",
+    "-.",
+    "--",
+    "-",
+]
+
+# Explicit translations for run labels that don't follow the "cbK_nqQ" pattern
+_EXPLICIT_RUN_LABELS = {
+    "token_clf_full_v2": r"($K=2^{15}$, $Q=4$)",
+    "feature_clf_full_v3": "continuous features",
+}
+
+
+def _build_style_map(run_labels: list[str]) -> dict[str, object]:
+    """Map each run label to a linestyle, ordered from most dashed to solid.
+
+    The *last* label in ``run_labels`` (assumed to be the least-compressed /
+    continuous-feature reference) always gets the solid line "-"; earlier
+    labels get progressively more dashed styles.
+    """
+    n = len(run_labels)
+    if n <= len(LINE_STYLES):
+        styles = LINE_STYLES[-n:]
+    else:
+        # More runs than distinct styles: pad with the most-dashed style.
+        styles = [LINE_STYLES[0]] * (n - len(LINE_STYLES)) + LINE_STYLES
+    return {label: styles[i] for i, label in enumerate(run_labels)}
+
+
+def _two_column_legend(
+    ax,
+    color_handles: list[Line2D],
+    style_handles: list[Line2D],
+    col1_title: str,
+    col2_title: str,
+    fontsize: float = 13,
+) -> None:
+    """Build a single 2-column legend: column 1 = color_handles (own header),
+    column 2 = style_handles (own header). A single legend with a header row
+    avoids the overlap that comes from stacking two separate ax.legend() boxes.
+
+    matplotlib fills multi-column legends column-major (down column 1 first,
+    then column 2), so each column's handles/labels must be laid out as a
+    contiguous run of equal length (header + entries + padding).
+    """
+    n_rows = max(len(color_handles), len(style_handles))
+    blank = Line2D([0], [0], alpha=0)
+
+    col1_handles = [blank] + color_handles + [blank] * (n_rows - len(color_handles))
+    col1_labels = (
+        [rf"$\mathbf{{{col1_title}}}$"]
+        + [h.get_label() for h in color_handles]
+        + [""] * (n_rows - len(color_handles))
+    )
+    col2_handles = [blank] + style_handles + [blank] * (n_rows - len(style_handles))
+    col2_labels = (
+        [rf"$\mathbf{{{col2_title}}}$"]
+        + [h.get_label() for h in style_handles]
+        + [""] * (n_rows - len(style_handles))
+    )
+
+    ax.legend(
+        col1_handles + col2_handles, col1_labels + col2_labels, ncol=2,
+        loc="upper right", fontsize=fontsize, framealpha=0.9, handlelength=2.2,
+        columnspacing=1.2, handletextpad=0.6,
+    )
+
+
+def _pretty_run_label(label: str) -> str:
+    """Translate a raw --run_labels entry into a legible legend string.
+
+    Recognizes the "cb{K}_nq{Q}" convention (e.g. "cb1024_nq3" -> "(K=2^10, Q=3)")
+    plus a small table of explicit overrides. Falls back to the raw label.
+    """
+    if label in _EXPLICIT_RUN_LABELS:
+        return _EXPLICIT_RUN_LABELS[label]
+    m = re.match(r"^cb(\d+)_nq(\d+)$", label)
+    if m:
+        k, q = int(m.group(1)), int(m.group(2))
+        log2k = k.bit_length() - 1
+        k_str = f"2^{{{log2k}}}" if 2 ** log2k == k else str(k)
+        return f"($K={k_str}$, $Q={q}$)"
+    return label
 
 
 def plot_comparison(
@@ -328,9 +419,9 @@ def plot_comparison(
     if class_names is None:
         class_names = DEFAULT_CLASS_NAMES
 
-    # Build a linestyle mapping for each run
+    # Build a linestyle mapping for each run (most compressed -> most dashed)
     run_labels = list(results.keys())
-    style_map = {label: LINE_STYLES[i % len(LINE_STYLES)] for i, label in enumerate(run_labels)}
+    style_map = _build_style_map(run_labels)
 
     # plt.style.use(hep.style.CMS)
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -360,16 +451,29 @@ def plot_comparison(
                 color=color,
                 linestyle=style_map[run_label],
                 linewidth=2,
-                label=f"{class_name} — {run_label} (AUC={roc_auc:.3f})",
             )
 
-    ax.set_xlabel("Signal Efficiency", fontsize=18)
-    ax.set_ylabel("Background Rejection (1/FPR)", fontsize=18)
+    ax.set_xlabel("Signal Efficiency", fontsize=27)
+    ax.set_ylabel("Background Rejection (1/FPR)", fontsize=27)
+    ax.tick_params(axis="both", which="major", labelsize=15)
     ax.set_yscale("log")
-    ax.set_xlim([0.0, 1.0])
+    ax.set_xlim([0., 1.0])
     ax.set_ylim([1, 1e4])
-    ax.legend(loc="upper right", fontsize=13, ncol=1)
     ax.grid(True, alpha=0.3)
+
+    # Single 2-column legend: column 1 = flavor (color), column 2 = model
+    # (linestyle), each with its own header.
+    color_handles = [
+        Line2D([0], [0], color=colors[class_idx % len(colors)], lw=2,
+               label=class_names.get(class_idx, str(class_idx)))
+        for class_idx in range(n_classes)
+    ]
+    style_handles = [
+        Line2D([0], [0], color="black", lw=2, linestyle=style_map[run_label],
+               label=_pretty_run_label(run_label))
+        for run_label in run_labels
+    ]
+    _two_column_legend(ax, color_handles, style_handles, "Flavor", "Model", fontsize=13)
     # hep.cms.label(ax=ax, label="Simulation", data=False, fontsize=12)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -449,7 +553,7 @@ def plot_btag_roc(
     bkg_indices = [i for i in range(n_classes) if i != signal_idx]
 
     run_labels = list(results.keys())
-    style_map = {label: LINE_STYLES[i % len(LINE_STYLES)] for i, label in enumerate(run_labels)}
+    style_map = _build_style_map(run_labels)
 
     fig, ax = plt.subplots(figsize=(8, 8))
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
@@ -463,6 +567,13 @@ def plot_btag_roc(
             if len(sig_eff) == 0:
                 continue
 
+            # Binary AUC for this (signal, background) pair
+            mask = (labels == signal_idx) | (labels == bkg_idx)
+            y_true = (labels[mask] == signal_idx).astype(int)
+            y_score = probs[mask, signal_idx]
+            fpr_b, tpr_b, _ = roc_curve(y_true, y_score)
+            roc_auc = auc(fpr_b, tpr_b)
+
             with np.errstate(divide="ignore", invalid="ignore"):
                 rejection = np.where(bkg_misid > 0, 1.0 / bkg_misid, np.nan)
 
@@ -474,17 +585,30 @@ def plot_btag_roc(
                 color=color,
                 linestyle=style_map[run_label],
                 linewidth=2,
-                label=f"{bkg_name} rej. — {run_label}",
             )
 
     sig_name = class_names.get(signal_idx, signal_class)
-    ax.set_xlabel(f"{sig_name}-jet Efficiency", fontsize=18)
-    ax.set_ylabel("Background Rejection", fontsize=18)
+    ax.set_xlabel(f"{sig_name}-jet Efficiency", fontsize=27, loc="right")
+    ax.set_ylabel("Background Rejection", fontsize=27, loc="top")
+    ax.tick_params(axis="both", which="major", labelsize=15)
     ax.set_yscale("log")
-    ax.set_xlim([0.0, 1.0])
-    ax.set_ylim([1, 1e6])
-    ax.legend(loc="upper right", fontsize=10, ncol=1)
+    ax.set_xlim([0.5, 1.0])
+    ax.set_ylim([1, 6e5])
     ax.grid(True, alpha=0.3)
+
+    # Single 2-column legend: column 1 = background flavor (color), column 2
+    # = model (linestyle), each with its own header.
+    color_handles = [
+        Line2D([0], [0], color=colors[bkg_plot_idx % len(colors)], lw=2,
+               label=class_names.get(bkg_idx, str(bkg_idx)))
+        for bkg_plot_idx, bkg_idx in enumerate(bkg_indices)
+    ]
+    style_handles = [
+        Line2D([0], [0], color="black", lw=2, linestyle=style_map[run_label],
+               label=_pretty_run_label(run_label))
+        for run_label in run_labels
+    ]
+    _two_column_legend(ax, color_handles, style_handles, "Bkg", "Model", fontsize=13)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight")
@@ -617,7 +741,10 @@ def main() -> None:
                 continue
             log.info("=== %s  (loading %s) ===", run_label, npz_path)
             data = np.load(npz_path)
-            probs, labels = data["probs"], data["labels"]
+            if args.max_jets and args.max_jets > 0:
+                probs, labels = data["probs"][:args.max_jets], data["labels"][:args.max_jets]
+            else:
+                probs, labels = data["probs"], data["labels"]
             results[run_label] = (probs, labels)
             if n_classes is None:
                 n_classes = probs.shape[1]

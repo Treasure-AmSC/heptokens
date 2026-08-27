@@ -1,5 +1,5 @@
 ---
-_target_: heptokens.data.cocoa_tracks.COCOATrackModule
+_target_: heptokens.data.cocoa_topos.COCOATopoModule
 
 # Data directory containing train/val/test subdirectories
 data_dir: /fs/ddn/sdf/group/atlas/d/jkrupa/treasure/4m/data_new/COCOA_samples_singlejet
@@ -7,25 +7,25 @@ train_dir: train_topup2_20M_cells256
 val_dir: val_100K_cells256
 test_dir: test_1M_cells256_isInfFalse
 
-# Track features to use
+# Topo cluster features
 features:
-  - track_pt
-  - track_eta
-  - track_phi
-  - track_d0
-  - track_z0
+  - topo_eta
+  - topo_phi
+  - topo_e
+  - topo_rho
+  - topo_sigma_eta
+  - topo_sigma_phi
+  - topo_ecal_e
+  - topo_hcal_e
 
-# Maximum tracks per event (pad/truncate)
-max_csts: 15
+# Maximum topo clusters per event (pad/truncate)
+max_csts: 50
 
 # DataLoader settings
 batch_size: 1024
 num_workers: 4
 pin_memory: true
 persistent_workers: true
-
-# Use streaming (iterable) or in-memory (mappable) dataset
-streaming: false
 
 # Optional: limit number of events loaded per split
 num_events:
@@ -37,4 +37,4 @@ transforms:
     _partial_: true
     cst_fn:
       _target_: joblib.load
-      filename: /sdf/data/atlas/u/jkrupa/heptokens/resources/cocoa_cst_log_standard.joblib
+      filename: /sdf/data/atlas/u/jkrupa/heptokens/resources/cocoa_topo_log_standard.joblib

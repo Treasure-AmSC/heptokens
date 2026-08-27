@@ -1,0 +1,57 @@
+---
+_target_: heptokens.data.token_npz.TokenNpzModule
+
+# Path to the pre-computed token .npz (from scripts/export_tokens.py).
+# For the large file, run heptokens.data.token_npz.extract_npy() once first so a
+# sibling <stem>_npy/ dir of mmap'd .npy sidecars is used automatically.
+data_path: /fs/ddn/sdf/group/atlas/d/jkrupa/heptokens/transformer_vqvae_enc_large_cb32768_cd8_nq4_lr0.0003_cw1.0_nj10000000/mc-flavtag-ttbar-large.npz
+
+# Optional: train on the union of several token files (e.g. small+medium+large ≈ 200M
+# jets). When set (non-null) this takes precedence over data_path. Each file is split
+# independently with the same fractions, and all files must share an identical codebook.
+data_paths: null
+
+# Optional: read the mmap'd <stem>_npy sidecars from this local root instead of from
+# next to the .npz (which lives on shared /fs/ddn storage where random-access reads are
+# slow). The Snakefile full-run rule stages the sidecars to /lscratch NVMe and sets this.
+# null = default behaviour (read sidecars next to the .npz). Data content is identical.
+sidecar_root: null
+
+# Split ratios (must sum to 1.0)
+train_frac: 0.7
+val_frac: 0.15
+test_frac: 0.15
+
+# Reproducible split
+seed: 42
+
+# Chunk size for per-chunk z_q reconstruction / streaming
+chunk_size: 1000
+
+# Streaming shuffle-buffer size for the TRAIN split (val/test stay in file order).
+# The dataset is an IterableDataset that reads contiguous file blocks, so without a
+# buffer consecutive samples in a batch are file-adjacent (correlated). The per-file
+# split is already a random permutation and block order is shuffled, so a modest buffer
+# decorrelates batches; a huge buffer just adds per-epoch warmup cost. Set 0 to disable.
+shuffle_buffer: 8192
+
+# Number of flavor classes
+n_classes: 4
+
+# codebook_dim of the stored tokens (informational; model gets its own model.codebook_dim)
+codebook_dim: 8
+
+# Use all constituents per jet
+num_csts: 40
+
+# DataLoader settings. The per-sample IterableDataset + on-the-fly z_q reconstruction is
+# CPU-bound, so use several workers (the full rule allocates matching --cpus-per-task) and
+# keep them alive across epochs to avoid re-spawning + re-filling the shuffle buffer.
+num_workers: 12
+batch_size: 1024
+pin_memory: false
+persistent_workers: true
+multiprocessing_context:
+
+# CRITICAL: tokens are already the final input; no preprocess_batch (would require csts).
+transforms: null

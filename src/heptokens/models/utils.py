@@ -36,9 +36,10 @@ class ScheduledOptimiserMixin:
         sched_partial = hp.get("scheduler", None)
         if callable(sched_partial):
             sched = sched_partial(optimizer=opt, model=self)
+            interval = hp.get("lr_interval", "epoch")
             return {
                 "optimizer": opt,
-                "lr_scheduler": {"scheduler": sched, "interval": "epoch"},
+                "lr_scheduler": {"scheduler": sched, "interval": interval},
             }
 
         return opt

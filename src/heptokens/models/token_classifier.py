@@ -304,6 +304,12 @@ class VectorEmbedder(Embedder):
         self.codebook_dim = codebook_dim
         self.d_model = d_model
         self.projection = T.nn.Linear(codebook_dim, d_model)
+        # The reconstructed z_q (sum of residual codebook vectors) is heavy-tailed:
+        # rare codes give per-token norms ~12x the typical scale, which injects
+        # activation/gradient spikes into the transformer. LayerNorm conditions each
+        # token's projected input to a bounded scale (the token-side analogue of the
+        # log+standard preprocessing the raw-feature classifier applies).
+        self.input_norm = T.nn.LayerNorm(d_model)
 
         self.tokenizer = None
         if tokenizer_ckpt is not None:
@@ -321,7 +327,7 @@ class VectorEmbedder(Embedder):
         mask = batch["mask"]     # [B, N]
 
         z_q = T.where(mask.unsqueeze(-1), z_q, T.zeros_like(z_q))
-        embeddings = self.projection(z_q)
+        embeddings = self.input_norm(self.projection(z_q))
 
         return embeddings, mask
 
@@ -394,16 +400,53 @@ class JetClassifier(ScheduledOptimiserMixin, LightningModule):
         self.log(f"{prefix}/total_loss", loss)
 
         acc = getattr(self, f"{prefix}_acc")
-        acc(output, labels)
-        self.log(f"{prefix}/acc", acc)
-
-        # Track AUC
         auc = getattr(self, f"{prefix}_auc")
         probs = T.softmax(output, dim=1)
-        auc(probs, labels)
-        self.log(f"{prefix}/auc", auc)
+
+        if prefix == "train":
+            # Log per-batch scalars and reset so metric state never grows.
+            # torchmetrics AUROC stores every batch's preds/targets to build
+            # the ROC; with ~136k steps/epoch this accumulation grows GPU
+            # memory unboundedly and makes each metric update O(n_steps),
+            # causing training throughput/GPU-util to decay over time. This
+            # only changes metric bookkeeping/logging, not the loss or grads.
+            self.log(f"{prefix}/acc", acc(output, labels))
+            self.log(f"{prefix}/auc", auc(probs, labels))
+            acc.reset()
+            auc.reset()
+        else:
+            # Validation runs on a limited set and Lightning resets these
+            # on_epoch metrics each validation epoch, so accumulating here is
+            # bounded and gives a proper metric over the whole val set.
+            acc(output, labels)
+            self.log(f"{prefix}/acc", acc)
+            auc(probs, labels)
+            self.log(f"{prefix}/auc", auc)
 
         return loss
+
+    def on_before_optimizer_step(self, optimizer) -> None:
+        # Log the global pre-clip gradient 2-norm each step so the grad-norm
+        # distribution is visible in wandb. Used to decide empirically whether
+        # (and at what threshold) gradient clipping is needed. Per-parameter
+        # norms are stacked on-device so this adds a single host sync at log time.
+        norms = [
+            p.grad.detach().norm(2)
+            for p in self.parameters()
+            if p.grad is not None
+        ]
+        if norms:
+            total_norm = T.norm(T.stack(norms), 2)
+            self.log("train/grad_norm", total_norm)
+            # Non-finite guard: if any gradient is inf/nan, zero all gradients so
+            # this batch cannot poison the optimizer state (Adam's moments) and
+            # permanently NaN the run. Gradient-norm clipping cannot do this,
+            # since a nan/inf clip coefficient just propagates the nan.
+            if not T.isfinite(total_norm):
+                for p in self.parameters():
+                    if p.grad is not None:
+                        p.grad.zero_()
+                self.log("train/nonfinite_grad_skips", 1.0, reduce_fx="sum")
 
     def training_step(self, batch: dict) -> T.Tensor:
         return self._shared_step(batch, "train")

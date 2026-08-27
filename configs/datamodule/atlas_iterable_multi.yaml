@@ -1,0 +1,90 @@
+---
+_target_: heptokens.data.atlas_iterable.MultiFileIterModule
+
+# Train on the union of the small+medium+large h5 files (~200M jets), mirroring
+# token_clf_full over the three token .npz files. Each file is split independently with
+# the same fractions/seed and combined into one interleaved + shuffle-buffered stream.
+# NOTE: the COMPLETE large h5 lives under /sdf/data (168,495,316 jets). Do NOT use the
+# truncated /sdf/scratch copy.
+data_paths:
+  - /sdf/data/atlas/u/jkrupa/mc-flavtag-ttbar-large.h5
+  - /sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-medium.h5
+  - /sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-small.h5
+
+# Split ratios (must sum to 1.0)
+train_frac: 0.7
+val_frac: 0.15
+test_frac: 0.15
+
+# Random seed for reproducible splits (same seed => same held-out test split)
+seed: 42
+
+# Chunk size for memory-efficient block reads (larger => more contiguous HDF5 reads
+# per block, which amortizes shared-FS / NVMe latency when streaming ~200M jets).
+chunk_size: 4000
+
+# Streaming shuffle-buffer size for the TRAIN split only (val/test stay in file order).
+# KEPT SMALL on purpose: unlike the mmap'd token files, each sample here is a random-
+# access HDF5 read, and the buffer must FILL before the first batch is yielded (per
+# worker). A huge buffer (e.g. 200k) starves the GPU for a very long warmup and re-fills
+# every epoch (reload_dataloaders_every_n_epochs=1). The per-file split is already a
+# random permutation and block order is shuffled, so a modest buffer gives ample batch
+# decorrelation. Set 0 to disable.
+shuffle_buffer: 8192
+
+# Number of classes (light, c, b, tau)
+n_classes: 4
+
+# DataLoader settings. The 90 GB large h5 is staged to local NVMe (/lscratch) by the
+# Snakefile train/test rules (which override data_paths to the local copy); medium+small
+# (~17 GB) stream from the shared FS. Workers provide additional read parallelism.
+num_workers: 8
+batch_size: 1024
+# pin_memory MUST stay false: with num_workers>0 and truncated validation
+# (limit_val_batches), pin_memory=true leaked shared/pinned memory across validation
+# cycles and aborted a worker (SIGABRT) at ~step 50k. The stable original run used false.
+pin_memory: false
+persistent_workers: false
+multiprocessing_context:
+
+# Optional transforms (instantiated separately). The joblib filenames are placeholders
+# and are overridden to the real resources/{jet,cst}_quantiles.joblib by the Snakefile.
+transforms:
+  preprocess:
+    _target_: heptokens.data.collation.preprocess_batch
+    _partial_: true
+    cst_fn:
+      _target_: joblib.load
+      filename: /path/to/cst_quantiles.joblib
+    jet_fn:
+      _target_: joblib.load
+      filename: /path/to/jet_quantiles.joblib
+
+# Dataset-specific config (passed to MultiIndexedIterDataset via **data_config)
+label_key: HadronConeExclTruthLabelID
+jet_features: [pt, mass, eta, phi]
+cst_features:
+  - pt
+  - deta
+  - dphi
+  - d0
+  - d0RelativeToBeamspot
+  - d0Uncertainty
+  - d0RelativeToBeamspotUncertainty
+  - z0RelativeToBeamspot
+  - z0RelativeToBeamspotUncertainty
+  - z0SinTheta
+  - z0SinThetaUncertainty
+  - lifetimeSignedD0
+  - lifetimeSignedD0Significance
+  - lifetimeSignedZ0SinTheta
+  - lifetimeSignedZ0SinThetaSignificance
+  - theta
+  - thetaUncertainty
+  - qOverP
+  - qOverPUncertainty
+  - ptfrac
+# Optional limits
+max_jet_pt: 7.0e6
+max_cst_pt: 1.0e6
+num_csts: 40  # Use all constituents per jet

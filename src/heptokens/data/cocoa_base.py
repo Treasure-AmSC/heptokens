@@ -27,6 +27,9 @@ PARTICLE_FEATURES = [
     "particle_dep_e", "particle_pdgid",
 ]
 
+# Per-event scalar branch used to align tokens across modalities (e.g. for HEP4M).
+EVENTNUMBER_BRANCH = "eventNumber"
+
 TREE_NAME = "EventTree"
 
 

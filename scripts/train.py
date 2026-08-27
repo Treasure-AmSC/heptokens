@@ -90,7 +90,13 @@ def main(cfg: DictConfig) -> None:
         save_declaration(filename=str(Path("..") / "TEST_SUCCESS.txt"))
     else:
         log.info("Starting training!")
-        trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.ckpt_path)
+        # When warm-starting from a checkpoint's weights (weight_ckpt_path is set), the
+        # model weights are already loaded above. Pass ckpt_path=None so Lightning starts
+        # a FRESH fit (epoch 0, new optimizer/scheduler/warmup) instead of resuming the
+        # finished epoch counter from that checkpoint. Otherwise preserve existing
+        # behavior (resume optimizer/epoch state from cfg.ckpt_path, e.g. full_resume).
+        fit_ckpt_path = None if cfg.weight_ckpt_path else cfg.ckpt_path
+        trainer.fit(model, datamodule=datamodule, ckpt_path=fit_ckpt_path)
 
         log.info("Checking if training finished correctly")
         if trainer.state.status == "finished":
