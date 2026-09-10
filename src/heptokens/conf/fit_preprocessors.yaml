@@ -1,0 +1,29 @@
+---
+# @package _global_
+defaults:
+  - _self_
+  - hydra: default
+  - datamodule: ???  # must be supplied by the user
+
+output_dir: resources
+fit_jets: false
+max_batches:  # null = use full training set
+
+# Modes to fit for constituents. log_* modes require cst_log_feature_indices.
+cst_modes:
+  - quantile
+  - standard
+
+# Modes to fit for jets (only used when fit_jets: true). log_* require jet_log_feature_indices.
+jet_modes:
+  - quantile
+  - standard
+
+# Feature indices to apply log scaling before quantile/standard transform (e.g. [0] for pt)
+cst_log_feature_indices:
+jet_log_feature_indices:
+
+n_quantiles: 500
+log_offset: 1.0
+
+full_path: ${output_dir}
