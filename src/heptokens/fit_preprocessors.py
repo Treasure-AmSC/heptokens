@@ -13,6 +13,20 @@ from heptokens.data.transforms import create_preprocessing_transformer
 log = logging.getLogger(__name__)
 
 
+def _resolve_indices(indices, feature_names: list[str] | None, label: str) -> list[int] | None:
+    if not indices:
+        return None
+    resolved = []
+    for idx in indices:
+        if isinstance(idx, str):
+            if feature_names is None:
+                raise ValueError(f"{label}: got feature name '{idx}' but {label}_features not set")
+            resolved.append(list(feature_names).index(idx))
+        else:
+            resolved.append(int(idx))
+    return resolved
+
+
 def fit_preprocessors(cfg: DictConfig) -> None:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -38,15 +52,17 @@ def fit_preprocessors(cfg: DictConfig) -> None:
 
     saved_files: dict[str, str] = {}
 
+    cst_log_indices = _resolve_indices(
+        cfg.get("cst_log_feature_indices"), cfg.get("cst_features"), "cst"
+    )
+
     for mode in cfg.cst_modes:
-        if mode in ("log_quantile", "log_standard") and not cfg.get("cst_log_feature_indices"):
+        if mode in ("log_quantile", "log_standard") and not cst_log_indices:
             log.warning(f"Skipping cst mode '{mode}': cst_log_feature_indices not set")
             continue
         transformer = create_preprocessing_transformer(
             mode=mode,
-            log_feature_indices=list(cfg.cst_log_feature_indices)
-            if cfg.get("cst_log_feature_indices")
-            else None,
+            log_feature_indices=cst_log_indices,
             n_quantiles=cfg.n_quantiles,
             log_offset=cfg.log_offset,
             n_features=cst_array.shape[1],
@@ -60,15 +76,17 @@ def fit_preprocessors(cfg: DictConfig) -> None:
     if jet_batches:
         jet_array = np.concatenate(jet_batches, axis=0)
         log.info(f"Collected {len(jet_array)} jet samples, {jet_array.shape[1]} features")
+        jet_log_indices = _resolve_indices(
+            cfg.get("jet_log_feature_indices"), cfg.get("jet_features"), "jet"
+        )
+
         for mode in cfg.jet_modes:
-            if mode in ("log_quantile", "log_standard") and not cfg.get("jet_log_feature_indices"):
+            if mode in ("log_quantile", "log_standard") and not jet_log_indices:
                 log.warning(f"Skipping jet mode '{mode}': jet_log_feature_indices not set")
                 continue
             transformer = create_preprocessing_transformer(
                 mode=mode,
-                log_feature_indices=list(cfg.jet_log_feature_indices)
-                if cfg.get("jet_log_feature_indices")
-                else None,
+                log_feature_indices=jet_log_indices,
                 n_quantiles=cfg.n_quantiles,
                 log_offset=cfg.log_offset,
                 n_features=jet_array.shape[1],

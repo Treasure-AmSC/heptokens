@@ -15,7 +15,11 @@ cst_modes:
 jet_modes:
   - quantile
   - standard
-# Feature indices to apply log scaling before quantile/standard transform (e.g. [0] for pt)
+# Feature names in the order your datamodule returns them — used to resolve string log indices.
+# If set, cst_log_feature_indices / jet_log_feature_indices can be names instead of integers.
+cst_features:
+jet_features:
+# Features to log-scale before quantile/standard transform. Accept names (e.g. [pt]) or indices (e.g. [0]).
 cst_log_feature_indices:
 jet_log_feature_indices:
 n_quantiles: 500
