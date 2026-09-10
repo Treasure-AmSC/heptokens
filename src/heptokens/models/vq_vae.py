@@ -54,9 +54,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.reconstruction_weight = reconstruction_weight
         self.codebook_size = codebook_size
 
-        # Infer input dimension from data_sample if provided. data_sample may
-        # be a plain Tensor, or a Mapping (dict/batch) — in which case the
-        # tensor at ``input_key`` (default "csts") is used.
+        # Infer input dimension from data_sample if provided.
         if isinstance(data_sample, Mapping):
             input_dim = data_sample[input_key].shape[-1]
         elif data_sample is not None:

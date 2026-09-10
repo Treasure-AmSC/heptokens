@@ -168,10 +168,7 @@ def export(cfg: DictConfig) -> None:
     num_elements = getattr(datamodule.test_set, "num_elements", 40)
     num_quantizers = model.hparams.get("num_quantizers", 4)
 
-    # Optional, opt-in export-layer position tokenization. Disabled unless the
-    # caller's config explicitly provides a `pos_tokenizer` group. This never
-    # touches the VQ-VAE model, its encode/decode/loss, or ResidualVQ indices —
-    # positions are read directly from the dataloader batch by the writer.
+    # Optional, opt-in export-layer position tokenization.
     pos_tokenizer = None
     num_pos_features = 0
     if cfg.get("pos_tokenizer") is not None:
