@@ -11,7 +11,7 @@ Tokenize HEP physics objects (jets, tracks, calorimeter clusters, …) with resi
 `heptokens` is an installable Python library. It ships:
 - **Data classes** — generic HDF5 datasets and Lightning DataModules for structured (object + constituent) and flat (dense, maskless) data.
 - **VQ-VAE model** — `LitVqVae` wrapping `ResidualVQ` with pluggable encoder/decoder.
-- **CLI entry points** — `heptokens-train` and `heptokens-export` for Hydra-configured training and tokenization runs.
+- **CLI entry points** — `heptokens-fit-preprocessors`, `heptokens-train`, and `heptokens-export` for Hydra-configured preprocessing, training, and tokenization runs.
 
 ## Quick Start
 
@@ -63,26 +63,27 @@ Your HDF5 must have this layout (see `StructuredArrayHDF5Dataset` for full docs)
 
 ### 3. Fit preprocessors
 
-The VQ-VAE expects normalised inputs. Fit sklearn scalers on your training data and save them:
+The VQ-VAE expects normalised inputs. Use the `heptokens-fit-preprocessors` CLI to fit sklearn scalers on your training data and save them as joblib files:
 
-```python
-from heptokens.data.transforms import create_preprocessing_transformer
-from joblib import dump
-
-cst_scaler = create_preprocessing_transformer(
-    mode="log_quantile",
-    log_feature_indices=[0],   # index of pT in set_features
-    n_quantiles=500,
-)
-cst_scaler.fit(training_constituents)  # [n_valid_csts, n_features]
-dump(cst_scaler, "resources/cst_quantiles.joblib")
-
-jet_scaler = create_preprocessing_transformer(mode="quantile", n_quantiles=500)
-jet_scaler.fit(training_jets)  # [n_jets, n_jet_features]
-dump(jet_scaler, "resources/jet_quantiles.joblib")
+```bash
+heptokens-fit-preprocessors -cd /path/to/my_configs \
+  datamodule=my_jets \
+  output_dir=resources
 ```
 
-Then add them to your datamodule config:
+To also fit jet-level scalers, or to enable log-quantile mode (e.g. log-scaling pT at index 0):
+
+```bash
+heptokens-fit-preprocessors -cd /path/to/my_configs \
+  datamodule=my_jets \
+  output_dir=resources \
+  fit_jets=true \
+  cst_modes=[quantile,log_quantile] \
+  cst_features=[pt,deta,dphi,d0,z0] \
+  cst_log_feature_indices=[pt]
+```
+
+This saves `resources/cst_<mode>.joblib` (and `resources/jet_<mode>.joblib` when `fit_jets=true`) and writes `resources/preprocessor_config.yaml` with the file paths. Then add them to your datamodule config:
 
 ```yaml
 # append to my_configs/datamodule/my_jets.yaml
@@ -157,15 +158,41 @@ z_q, indices, _ = model.encode(batch)   # indices: [B, N, num_quantizers]
 
 ## CLI Reference
 
-`heptokens-train` and `heptokens-export` are Hydra-based CLI tools. Use `-cd` to point at your experiment's config directory containing the `datamodule/` folder. All other configs (model, callbacks, trainer) are bundled.
+All three commands are Hydra-based. Use `-cd` to point at your experiment's config directory containing the `datamodule/` folder. All other configs (model, callbacks, trainer) are bundled.
+
+### Full workflow
+
+```bash
+# 1. Fit scalers on training data
+heptokens-fit-preprocessors -cd /path/to/my_configs \
+  datamodule=my_jets \
+  output_dir=resources
+
+# 2. Wire the saved joblib paths into your datamodule config
+#    (see resources/preprocessor_config.yaml for the generated snippet)
+
+# 3. Train the VQ-VAE
+heptokens-train -cd /path/to/my_configs \
+  datamodule=my_jets \
+  project_name=my_project \
+  network_name=run_01 \
+  output_dir=results
+
+# 4. Export tokens from a trained checkpoint
+heptokens-export -cd /path/to/my_configs \
+  datamodule=my_jets \
+  ckpt_path=results/my_project/run_01/checkpoints/last.ckpt \
+  output_dir=results/tokens
+```
 
 ```bash
 # Without installing (pixi environment):
+pixi run python -m heptokens.fit_preprocessors -cd /path/to/my/configs datamodule=my_jets ...
 pixi run python -m heptokens.train -cd /path/to/my/configs datamodule=my_jets ...
 pixi run python -m heptokens.export_tokens -cd /path/to/my/configs datamodule=my_jets ...
 ```
 
-### Bundled configs
+### Bundled configs — `heptokens-train` / `heptokens-export`
 
 | Group | Location | Description |
 |---|---|---|
@@ -173,6 +200,24 @@ pixi run python -m heptokens.export_tokens -cd /path/to/my/configs datamodule=my
 | `callbacks` | `src/heptokens/conf/callbacks/` | `pretrain`, `encode`, `classify`, … |
 
 `datamodule` is not bundled — it is experiment-specific. See `StructuredArrayModule` in `src/heptokens/data/structured_array.py` for the constructor args.
+
+### Bundled configs — `heptokens-fit-preprocessors`
+
+The command ships `src/heptokens/conf/fit_preprocessors.yaml` with these key options:
+
+| Key | Default | Description |
+|---|---|---|
+| `output_dir` | `resources` | Directory to write joblib files and the config snippet |
+| `cst_modes` | `[quantile, standard]` | Scaler modes to fit for constituents |
+| `jet_modes` | `[quantile, standard]` | Scaler modes to fit for jet-level features |
+| `fit_jets` | `false` | Set `true` to also fit jet-level scalers |
+| `cst_features` | — | Ordered feature name list; enables string names in `cst_log_feature_indices` |
+| `jet_features` | — | Same for jet features |
+| `cst_log_feature_indices` | — | Features to log-scale before the main transform (names or indices) |
+| `jet_log_feature_indices` | — | Same for jet features |
+| `n_quantiles` | `500` | Number of quantiles for `QuantileTransformer` |
+| `log_offset` | `1.0` | Offset in `log(x + offset)` |
+| `max_batches` | — | Limit training batches used for fitting (null = full dataset) |
 
 ### Output layout
 
@@ -217,6 +262,7 @@ src/heptokens/
     utils/
     train.py                    # heptokens-train entry point
     export_tokens.py            # heptokens-export entry point
+    fit_preprocessors.py        # heptokens-fit-preprocessors entry point
 tests/
 profiles/                       # Slurm executor profiles for pixi tasks
 ```
