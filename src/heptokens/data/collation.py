@@ -72,32 +72,33 @@ class VqvaeTokenizer:
 def preprocess_batch(
     jet_dict: dict[T.Tensor],
     cst_fn: BaseEstimator,
-    jet_fn: BaseEstimator,
+    jet_fn: BaseEstimator | None = None,
 ) -> dict:
     """Preprocess a batch of jets already stored as pytorch tensors."""
     csts = jet_dict["csts"]
     mask = jet_dict["mask"]
-    jets = jet_dict["jets"]
 
     # Convert to numpy for sklearn
     csts_np = csts.cpu().numpy() if isinstance(csts, T.Tensor) else csts
-    jets_np = jets.cpu().numpy() if isinstance(jets, T.Tensor) else jets
+    mask_np = mask.cpu().numpy() if isinstance(mask, T.Tensor) else mask
 
     # Pad and transform
     if (feat_diff := cst_fn.n_features_in_ - csts_np.shape[-1]) > 0:
         zeros = np.zeros((csts_np.shape[:-1] + (feat_diff,)), dtype=csts_np.dtype)
         csts_np = np.concatenate((csts_np, zeros), axis=-1)
 
-    csts_np[mask.cpu().numpy() if isinstance(mask, T.Tensor) else mask] = cst_fn.transform(
-        csts_np[mask.cpu().numpy() if isinstance(mask, T.Tensor) else mask]
-    )
+    csts_np[mask_np] = cst_fn.transform(csts_np[mask_np])
 
     if feat_diff > 0:
         csts_np = csts_np[..., :-feat_diff]
 
     # Convert back to tensor
     jet_dict["csts"] = T.from_numpy(csts_np).float()
-    jet_dict["jets"] = T.from_numpy(jet_fn.transform(jets_np)).float()
+
+    if jet_fn is not None:
+        jets = jet_dict["jets"]
+        jets_np = jets.cpu().numpy() if isinstance(jets, T.Tensor) else jets
+        jet_dict["jets"] = T.from_numpy(jet_fn.transform(jets_np)).float()
 
     return jet_dict
 
