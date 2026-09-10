@@ -104,9 +104,7 @@ class MemmapPredictionWriter(BasePredictionWriter):
         self.pos_tokens_mmap = None
         if self.has_pos_tokens:
             if num_pos_features <= 0:
-                raise ValueError(
-                    "num_pos_features must be > 0 when pos_tokenizer is provided"
-                )
+                raise ValueError("num_pos_features must be > 0 when pos_tokenizer is provided")
             self.pos_tokens_path = self.tmp_dir / "pos_tokens.npy"
             self.pos_tokens_mmap = np.lib.format.open_memmap(
                 str(self.pos_tokens_path),
