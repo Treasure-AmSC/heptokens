@@ -72,7 +72,12 @@ class CoderModel(nn.Module):
         layers.append(nn.Linear(prev_dim, output_dim))
         self.model = nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        positions: Optional[torch.Tensor] = None,  # noqa: ARG002 -- unused; per-patch MLP needs no positional info
+    ) -> torch.Tensor:
         """Forward pass through the model."""
         if mask is not None:
             # Select valid inputs
@@ -98,6 +103,7 @@ class Coder(nn.Module):
         model: nn.Module = CoderModel,
         input_key: str = "csts",
         mask_key: str = "mask",
+        positions_key: Optional[str] = None,
         data_sample=None,
     ):
         super(Coder, self).__init__()
@@ -107,6 +113,12 @@ class Coder(nn.Module):
         self.coder = model(input_dim=input_dim, output_dim=output_dim)
         self.input_key = input_key
         self.mask_key = mask_key
+        # Optional key for a per-token spatial coordinates tensor (e.g.
+        # [eta, cos_phi, sin_phi]), forwarded to the inner model as
+        # `positions=...` for architectures that support positional encoding
+        # (e.g. Transformer). None by default -- no behavior change unless a
+        # config explicitly sets this.
+        self.positions_key = positions_key
 
 
 class Encoder(Coder, BaseEncoder):
@@ -125,7 +137,10 @@ class Encoder(Coder, BaseEncoder):
             with invalid (masked) positions zeroed out.
         """
         mask = batch.get(self.mask_key)
-        z_e = self.coder(batch[self.input_key], mask)
+        if self.positions_key:
+            z_e = self.coder(batch[self.input_key], mask, positions=batch.get(self.positions_key))
+        else:
+            z_e = self.coder(batch[self.input_key], mask)
         return z_e
 
 
@@ -143,6 +158,8 @@ class Decoder(Coder, BaseDecoder):
             with invalid positions zeroed out.
         """
         mask = batch.get(self.mask_key)
+        if self.positions_key:
+            return self.coder(z_q, mask, positions=batch.get(self.positions_key))
         return self.coder(z_q, mask)
 
     def compute_loss(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:

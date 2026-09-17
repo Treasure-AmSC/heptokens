@@ -6,10 +6,10 @@ from typing import Dict, Tuple
 
 import torch
 from lightning import LightningModule
-from vector_quantize_pytorch import ResidualVQ
 
 from heptokens.models.coders import Decoder, Encoder
 from heptokens.models.utils import ScheduledOptimiserMixin, compute_codebook_utilization
+from heptokens.models.vq_layers import RevivingResidualVQ
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         input_key: str = "csts",
         mask_key: str | None = "mask",
         data_sample: torch.Tensor | dict = None,
+        threshold_ema_dead_code: float = 0.0,
         **kwargs,
     ):
         super().__init__()
@@ -71,12 +72,17 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         # Declare decoder
         self.decoder = decoder(input_dim=codebook_dim, output_dim=input_dim, data_sample=data_sample)
 
-        # Vector quantization
-        self.vector_quantization = ResidualVQ(
+        # Vector quantization. Uses RevivingResidualVQ (dead-code revival on
+        # top of the vendored vector_quantize_pytorch, which otherwise has no
+        # protection against codebook collapse) -- disabled by default
+        # (threshold_ema_dead_code=0) to exactly preserve prior behavior;
+        # pass threshold_ema_dead_code>0 (e.g. 1.0) to opt in.
+        self.vector_quantization = RevivingResidualVQ(
             dim=codebook_dim,
             codebook_size=codebook_size,
             num_quantizers=num_quantizers,
             commitment=commitment_weight,
+            threshold_ema_dead_code=threshold_ema_dead_code,
         )
 
     def encode(
