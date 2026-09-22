@@ -6,7 +6,7 @@ from pathlib import Path
 import hydra
 import joblib
 import numpy as np
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 from heptokens.data.transforms import create_preprocessing_transformer
 
@@ -20,16 +20,32 @@ def _resolve_indices(indices, feature_names: list[str] | None, label: str) -> li
     for idx in indices:
         if isinstance(idx, str):
             if feature_names is None:
-                raise ValueError(f"{label}: got feature name '{idx}' but {label}_features not set")
+                raise ValueError(
+                    f"{label}: got feature name '{idx}' but datamodule has no "
+                    "set_features/obj_features to resolve it"
+                )
             resolved.append(list(feature_names).index(idx))
         else:
             resolved.append(int(idx))
     return resolved
 
 
-def fit_preprocessors(cfg: DictConfig) -> None:
+def fit_preprocessors(cfg: DictConfig, preprocessing: DictConfig) -> None:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    p = preprocessing
+    cst_modes = OmegaConf.select(p, "cst_modes", default=["quantile", "standard"])
+    jet_modes = OmegaConf.select(p, "jet_modes", default=["quantile", "standard"])
+    fit_jets = OmegaConf.select(p, "fit_jets", default=False)
+    n_quantiles = OmegaConf.select(p, "n_quantiles", default=500)
+    log_offset = OmegaConf.select(p, "log_offset", default=1.0)
+    cst_log_feature_indices = OmegaConf.select(p, "cst_log_feature_indices", default=None)
+    jet_log_feature_indices = OmegaConf.select(p, "jet_log_feature_indices", default=None)
+
+    dm_cfg = cfg.datamodule
+    cst_features = list(dm_cfg.set_features) if OmegaConf.select(dm_cfg, "set_features") else None
+    jet_features = list(dm_cfg.obj_features) if OmegaConf.select(dm_cfg, "obj_features") else None
 
     log.info("Instantiating the data module")
     datamodule = hydra.utils.instantiate(cfg.datamodule)
@@ -44,7 +60,7 @@ def fit_preprocessors(cfg: DictConfig) -> None:
         csts = batch["csts"]
         mask = batch["mask"]
         cst_batches.append(csts[mask].numpy())
-        if cfg.fit_jets and "jets" in batch:
+        if fit_jets and "jets" in batch:
             jet_batches.append(batch["jets"].numpy())
 
     cst_array = np.concatenate(cst_batches, axis=0)
@@ -52,19 +68,17 @@ def fit_preprocessors(cfg: DictConfig) -> None:
 
     saved_files: dict[str, str] = {}
 
-    cst_log_indices = _resolve_indices(
-        cfg.get("cst_log_feature_indices"), cfg.get("cst_features"), "cst"
-    )
+    cst_log_indices = _resolve_indices(cst_log_feature_indices, cst_features, "cst")
 
-    for mode in cfg.cst_modes:
+    for mode in cst_modes:
         if mode in ("log_quantile", "log_standard") and not cst_log_indices:
             log.warning(f"Skipping cst mode '{mode}': cst_log_feature_indices not set")
             continue
         transformer = create_preprocessing_transformer(
             mode=mode,
             log_feature_indices=cst_log_indices,
-            n_quantiles=cfg.n_quantiles,
-            log_offset=cfg.log_offset,
+            n_quantiles=n_quantiles,
+            log_offset=log_offset,
             n_features=cst_array.shape[1],
         )
         transformer.fit(cst_array)
@@ -76,19 +90,17 @@ def fit_preprocessors(cfg: DictConfig) -> None:
     if jet_batches:
         jet_array = np.concatenate(jet_batches, axis=0)
         log.info(f"Collected {len(jet_array)} jet samples, {jet_array.shape[1]} features")
-        jet_log_indices = _resolve_indices(
-            cfg.get("jet_log_feature_indices"), cfg.get("jet_features"), "jet"
-        )
+        jet_log_indices = _resolve_indices(jet_log_feature_indices, jet_features, "jet")
 
-        for mode in cfg.jet_modes:
+        for mode in jet_modes:
             if mode in ("log_quantile", "log_standard") and not jet_log_indices:
                 log.warning(f"Skipping jet mode '{mode}': jet_log_feature_indices not set")
                 continue
             transformer = create_preprocessing_transformer(
                 mode=mode,
                 log_feature_indices=jet_log_indices,
-                n_quantiles=cfg.n_quantiles,
-                log_offset=cfg.log_offset,
+                n_quantiles=n_quantiles,
+                log_offset=log_offset,
                 n_features=jet_array.shape[1],
             )
             transformer.fit(jet_array)
@@ -120,7 +132,9 @@ def _write_config_snippet(output_dir: Path, saved_files: dict[str, str]) -> None
     config_name="fit_preprocessors.yaml",
 )
 def main(cfg: DictConfig) -> None:
-    fit_preprocessors(cfg)
+    with open_dict(cfg):
+        preprocessing = cfg.datamodule.pop("preprocessing", OmegaConf.create({}))
+    fit_preprocessors(cfg, preprocessing)
 
 
 if __name__ == "__main__":

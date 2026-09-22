@@ -71,16 +71,33 @@ heptokens-fit-preprocessors -cd /path/to/my_configs \
   output_dir=resources
 ```
 
-To also fit jet-level scalers, or to enable log-quantile mode (e.g. log-scaling pT at index 0):
+Dataset-specific options (which modes to fit, which features to log-scale, etc.) live in a `preprocessing:` block inside your datamodule config so they don't need to be repeated on every invocation:
+
+```yaml
+# my_configs/datamodule/my_jets.yaml
+_target_: heptokens.data.structured_array.StructuredArrayModule
+set_features: [pt, deta, dphi, d0, z0]
+...
+preprocessing:
+  cst_modes: [quantile, log_quantile]
+  cst_log_feature_indices: [pt]   # resolved via set_features — no separate feature list needed
+  fit_jets: true
+```
+
+Then just run:
 
 ```bash
 heptokens-fit-preprocessors -cd /path/to/my_configs \
   datamodule=my_jets \
-  output_dir=resources \
-  fit_jets=true \
-  cst_modes=[quantile,log_quantile] \
-  cst_features=[pt,deta,dphi,d0,z0] \
-  cst_log_feature_indices=[pt]
+  output_dir=resources
+```
+
+Individual keys can still be overridden on the CLI with `datamodule.preprocessing.<key>=...`:
+
+```bash
+heptokens-fit-preprocessors -cd /path/to/my_configs \
+  datamodule=my_jets \
+  datamodule.preprocessing.cst_modes=[quantile,log_quantile]
 ```
 
 This saves `resources/cst_<mode>.joblib` (and `resources/jet_<mode>.joblib` when `fit_jets=true`) and writes `resources/preprocessor_config.yaml` with the file paths. Then add them to your datamodule config:
@@ -205,19 +222,24 @@ pixi run python -m heptokens.export_tokens -cd /path/to/my/configs datamodule=my
 
 The command ships `src/heptokens/conf/fit_preprocessors.yaml` with these key options:
 
+Top-level keys (set on the CLI or in your own `fit_preprocessors.yaml`):
+
 | Key | Default | Description |
 |---|---|---|
 | `output_dir` | `resources` | Directory to write joblib files and the config snippet |
+| `max_batches` | — | Limit training batches used for fitting (null = full dataset) |
+
+`preprocessing:` block keys (set inside your datamodule config, or via `datamodule.preprocessing.<key>=...` on the CLI):
+
+| Key | Default | Description |
+|---|---|---|
 | `cst_modes` | `[quantile, standard]` | Scaler modes to fit for constituents |
 | `jet_modes` | `[quantile, standard]` | Scaler modes to fit for jet-level features |
 | `fit_jets` | `false` | Set `true` to also fit jet-level scalers |
-| `cst_features` | — | Ordered feature name list; enables string names in `cst_log_feature_indices` |
-| `jet_features` | — | Same for jet features |
-| `cst_log_feature_indices` | — | Features to log-scale before the main transform (names or indices) |
-| `jet_log_feature_indices` | — | Same for jet features |
+| `cst_log_feature_indices` | — | Features to log-scale before the main transform (names resolved via `set_features`, or indices) |
+| `jet_log_feature_indices` | — | Same for jet features (names resolved via `obj_features`) |
 | `n_quantiles` | `500` | Number of quantiles for `QuantileTransformer` |
 | `log_offset` | `1.0` | Offset in `log(x + offset)` |
-| `max_batches` | — | Limit training batches used for fitting (null = full dataset) |
 
 ### Output layout
 
