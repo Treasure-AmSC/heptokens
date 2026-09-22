@@ -11,8 +11,8 @@ Usage (from an experiment repo with local configs):
 
 Output npz contains:
     indices     : [N, num_elements, num_quantizers]  int16  (-1 = masked)
-    labels      : [N]                                int8
     codebooks   : [num_quantizers, codebook_size, codebook_dim]  float32
+    labels      : [N]                                int8   (if dataset has labels)
     eventNumber : [N]                            int64  (if present in dataset)
 
 Reconstruction:
@@ -97,6 +97,7 @@ class MemmapPredictionWriter(BasePredictionWriter):
             dtype=np.int64,
             shape=(total_jets,),
         )
+        self.has_labels = False
         self.has_events = False
 
         self.has_pos_tokens = self.pos_tokenizer is not None
@@ -119,11 +120,14 @@ class MemmapPredictionWriter(BasePredictionWriter):
         self, trainer, pl_module, prediction, batch_indices, batch, batch_idx, dataloader_idx
     ):
         indices = prediction["indices"].cpu().numpy().astype(np.int16)
-        labels = prediction["labels"].cpu().numpy().astype(np.int8)
-        n = len(labels)
+        n = len(indices)
 
         self.indices_mmap[self.pos : self.pos + n] = indices
-        self.labels_mmap[self.pos : self.pos + n] = labels
+
+        if "labels" in prediction:
+            self.has_labels = True
+            labels = prediction["labels"].cpu().numpy().astype(np.int8)
+            self.labels_mmap[self.pos : self.pos + n] = labels
 
         if "eventNumber" in prediction:
             self.has_events = True
@@ -209,13 +213,23 @@ def export(cfg: DictConfig) -> None:
         log.info(f"Wrote {actual_jets:,} jets to memmap")
 
         indices = np.lib.format.open_memmap(str(writer.indices_path), mode="r")[:actual_jets]
-        labels = np.lib.format.open_memmap(str(writer.labels_path), mode="r")[:actual_jets]
         codebooks = extract_codebooks(model)
 
-        stem = Path(cfg.datamodule.data_path).stem
+        # data_path (flat), dataset.file_path (ATLAS-style nested), or data_paths (AOJ, list)
+        dm_cfg = cfg.datamodule
+        if "data_path" in dm_cfg:
+            file_path = dm_cfg.data_path
+        elif "dataset" in dm_cfg and "file_path" in dm_cfg.dataset:
+            file_path = dm_cfg.dataset.file_path
+        else:
+            file_path = dm_cfg.data_paths[0]
+        stem = Path(file_path).stem
         out_path = output_dir / f"{stem}.npz"
 
-        save_dict = dict(indices=indices, labels=labels, codebooks=codebooks)
+        save_dict = dict(indices=indices, codebooks=codebooks)
+        if writer.has_labels:
+            labels = np.lib.format.open_memmap(str(writer.labels_path), mode="r")[:actual_jets]
+            save_dict["labels"] = labels
         if writer.has_events:
             event_numbers = np.lib.format.open_memmap(str(writer.events_path), mode="r")[
                 :actual_jets
