@@ -101,7 +101,7 @@ class Coder(nn.Module):
         data_sample=None,
     ):
         super(Coder, self).__init__()
-        # Build coder (encoder/decoder). data_sample is accepted for 
+        # Build coder (encoder/decoder). data_sample is accepted for
         # callers that pass it (e.g. LitVqVae)
         self.coder = model(input_dim=input_dim, output_dim=output_dim)
         self.input_key = input_key

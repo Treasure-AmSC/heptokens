@@ -1,0 +1,20 @@
+---
+# @package _global_
+defaults:
+  - _self_
+  - hydra: default
+  - datamodule: ???  # must be supplied by the user
+output_dir: resources
+max_batches:  # null = use full training set
+
+# Dataset-specific preprocessing options live in a preprocessing: block inside your
+# datamodule config. Override individual keys on the CLI with datamodule.preprocessing.<key>=...
+#
+# Defaults when no preprocessing: block is present:
+#   cst_modes: [quantile, standard]
+#   jet_modes: [quantile, standard]
+#   fit_jets: false
+#   n_quantiles: 500
+#   log_offset: 1.0
+#   cst_log_feature_indices: null
+#   jet_log_feature_indices: null
