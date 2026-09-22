@@ -189,13 +189,61 @@ class CellDecoder(Decoder):
     """Decoder for calorimeter cell patch data with pixel-level sparsity handling.
 
     Expects the input key to hold a tensor of shape ``[B, T, 2*n_pixels]`` where
-    the first half is the energy (energy^0.3) and the second half is a binary
-    pixel-level occupancy indicator — both computed in ``CellDataset.__getitem__``.
+    the first half is the energy (energy^p, p=``energy_power``) and the second
+    half is a binary pixel-level occupancy indicator — both computed in
+    ``CellDataset.__getitem__``.
 
     Loss:
       - Binary cross-entropy on the indicator for all pixels in non-empty patches
-      - MSE on energy for pixels where the indicator is 1 (occupied pixels only)
+      - MSE on energy for pixels where the indicator is 1 (occupied pixels only),
+        optionally weighted per pixel by ``w_i = E_i**energy_loss_alpha`` where
+        ``E_i`` is the linear truth energy recovered from the compressed target
+        (``E = y**(1/energy_power)``). ``energy_loss_alpha=0`` reproduces the
+        original unweighted MSE exactly.
+      - Optionally (``energy_sum_loss_weight>0``) a per-patch linear-space
+        energy-sum term ``((sum_i ohat_i*Ehat_i) - (sum_i o_i*E_i))**2``.
+
+    After each ``compute_loss`` call, ``self.last_metrics`` holds the scalar
+    breakdown (weighted/unweighted energy MSE, occupancy BCE, energy-sum term)
+    plus the configured weights, so the Lightning module can log them.
+
+    Args:
+        energy_loss_alpha: Exponent alpha for the per-pixel energy-MSE weight
+            ``w_i = E_i**alpha`` (E_i = linear truth energy). 0 disables
+            weighting (bitwise-identical to the original loss).
+        energy_sum_loss_weight: Weight lambda for the optional per-patch
+            linear-space energy-sum term. 0 disables it.
+        energy_power: Preprocessing energy compression exponent p (targets are
+            stored as ``E**p``); the inverse ``1/p`` recovers linear energy.
+            Must match ``preprocess_hep4m_cells.py``'s ``ENERGY_POWER``.
     """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        model: nn.Module = CoderModel,
+        input_key: str = "csts",
+        mask_key: str = "mask",
+        positions_key: Optional[str] = None,
+        data_sample=None,
+        energy_loss_alpha: float = 0.0,
+        energy_sum_loss_weight: float = 0.0,
+        energy_power: float = 0.3,
+    ):
+        super().__init__(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            model=model,
+            input_key=input_key,
+            mask_key=mask_key,
+            positions_key=positions_key,
+            data_sample=data_sample,
+        )
+        self.energy_loss_alpha = float(energy_loss_alpha)
+        self.energy_sum_loss_weight = float(energy_sum_loss_weight)
+        self.energy_power = float(energy_power)
+        self.last_metrics: Dict[str, float] = {}
 
     def compute_loss(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         targets = batch[self.input_key]  # [B, T, 2*n_pixels]
@@ -218,11 +266,87 @@ class CellDecoder(Decoder):
             pixel_mask = ind_true > 0.5
 
         if pixel_mask.any():
-            loss_energy = nn.functional.mse_loss(energy_recon[pixel_mask], energy_true[pixel_mask])
+            energy_recon_sel = energy_recon[pixel_mask]
+            energy_true_sel = energy_true[pixel_mask]
+            # Unweighted MSE — identical to the original loss (also the
+            # alpha=0 return value, so alpha=0 stays bitwise-identical).
+            loss_energy_unweighted = nn.functional.mse_loss(energy_recon_sel, energy_true_sel)
+            if self.energy_loss_alpha != 0.0:
+                # Targets are raw E**p — CellDataset applies no standardization
+                # (unlike tracks/topos), so E = y**(1/p) exactly and y>=0.
+                # Compute in float32: pow(1/p) can overflow fp16 under AMP.
+                energy_true_f = energy_true_sel.float()
+                energy_recon_f = energy_recon_sel.float()
+                energy_true_lin = energy_true_f.clamp(min=0.0).pow(1.0 / self.energy_power)
+                weight = energy_true_lin.pow(self.energy_loss_alpha)
+                sq = (energy_recon_f - energy_true_f) ** 2
+                # Normalize by sum(w) (not pixel count) so the loss scale is
+                # comparable across alpha.
+                weight_sum = weight.sum().clamp_min(torch.finfo(weight.dtype).eps)
+                loss_energy = (weight * sq).sum() / weight_sum
+            else:
+                loss_energy = loss_energy_unweighted
         else:
             loss_energy = recon.sum() * 0.0  # differentiable zero
+            loss_energy_unweighted = loss_energy
 
-        return loss_energy + loss_ind
+        loss = loss_energy + loss_ind
+
+        if self.energy_sum_loss_weight != 0.0:
+            loss_energy_sum = self._energy_sum_loss(
+                energy_recon, ind_logits, energy_true, ind_true, mask
+            )
+            loss = loss + self.energy_sum_loss_weight * loss_energy_sum
+        else:
+            loss_energy_sum = recon.sum() * 0.0
+
+        self.last_metrics = {
+            "energy_mse": loss_energy_unweighted.detach(),
+            "energy_mse_weighted": loss_energy.detach(),
+            "occupancy_bce": loss_ind.detach(),
+            "energy_sum_mse": loss_energy_sum.detach(),
+            "energy_loss_alpha": self.energy_loss_alpha,
+            "energy_sum_loss_weight": self.energy_sum_loss_weight,
+        }
+        return loss
+
+    def _energy_sum_loss(
+        self,
+        energy_recon: torch.Tensor,
+        ind_logits: torch.Tensor,
+        energy_true: torch.Tensor,
+        ind_true: torch.Tensor,
+        mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Per-patch *relative* linear-space energy-sum MSE, averaged over
+        patches with real energy.
+
+        ``sum_reco = sum_i sigmoid(ind_logits_i) * Ehat_i`` and
+        ``sum_true = sum_i o_i * E_i`` per patch, both in linear energy space
+        (``E = y**(1/energy_power)``). The residual is taken relative to
+        ``sum_true`` (``(sum_reco - sum_true)/sum_true``) so it matches the
+        ratio-based eval metric and shares the y-space terms' scale (an
+        absolute GeV^2 term would be dominated by the hottest patches and sit
+        ~1e4x higher); returns the mean squared relative error over patches
+        with ``sum_true > 0`` (empty patches have no meaningful ratio).
+
+        Computed in float32: pow(1/p) ~ pow(3.33) and the squared sums can
+        overflow fp16 under AMP.
+        """
+        inv_p = 1.0 / self.energy_power
+        energy_recon_lin = energy_recon.float().clamp(min=0.0).pow(inv_p)
+        energy_true_lin = energy_true.float().clamp(min=0.0).pow(inv_p)
+        sum_reco = (torch.sigmoid(ind_logits.float()) * energy_recon_lin).sum(dim=-1)  # [B, T]
+        sum_true = (ind_true.float() * energy_true_lin).sum(dim=-1)  # [B, T]
+        valid = sum_true > 0
+        if mask is not None:
+            valid = valid & mask
+        if not valid.any():
+            return energy_recon.sum().float() * 0.0
+        rel = (sum_reco[valid] - sum_true[valid]) / sum_true[valid].clamp_min(
+            torch.finfo(sum_true.dtype).eps
+        )
+        return (rel**2).mean()
 
 
 class DiffusionDecoder(BaseDecoder):

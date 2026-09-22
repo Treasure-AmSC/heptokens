@@ -205,6 +205,10 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("train/recon_loss", recon_loss, prog_bar=True)
         self.log("train/commit_loss", commit_loss, prog_bar=True)
 
+        # Log any per-decoder loss breakdown (e.g. CellDecoder's weighted vs
+        # unweighted energy MSE and the configured energy_loss_alpha).
+        self._log_decoder_metrics("train")
+
         # Log codebook utilization per quantizer
         utils = compute_codebook_utilization(indices, batch.get(self.mask_key), self.codebook_size)
         for q, u in enumerate(utils):
@@ -212,6 +216,13 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("train/codebook_util_avg", sum(utils) / len(utils))
 
         return total_loss
+
+    def _log_decoder_metrics(self, stage: str) -> None:
+        """Log the decoder's optional ``last_metrics`` breakdown, if present."""
+        extra = getattr(self.decoder, "last_metrics", None)
+        if extra:
+            for name, value in extra.items():
+                self.log(f"{stage}/{name}", value)
 
     def validation_step(
         self, batch: Dict[str, torch.Tensor], batch_idx: int
@@ -233,6 +244,9 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.log("val/total_loss", total_loss, prog_bar=True)
         self.log("val/recon_loss", recon_loss, prog_bar=True)
         self.log("val/commit_loss", commit_loss, prog_bar=True)
+
+        # Log any per-decoder loss breakdown (see training_step).
+        self._log_decoder_metrics("val")
 
         # Log codebook utilization per quantizer
         utils = compute_codebook_utilization(indices, batch.get(self.mask_key), self.codebook_size)
