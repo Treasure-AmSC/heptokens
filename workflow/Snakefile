@@ -2277,6 +2277,8 @@ rule eval_pflow_cont:
 # ══════════════════════════════════════════════════════════════════════════════
 # Shells are copies of train_tokenizer/test_tokenizer and train/test_cocoa_{tracks,topos}
 # with cst_fn and free-form `extra` / `test_extra` override slots (empty unless needed).
+import yaml
+
 JETSET_CST_FN = f"{WORKSPACE}/resources/cst_quantiles.joblib"
 JETSET_JET_FN = f"{WORKSPACE}/resources/jet_quantiles.joblib"
 # Relative, as the reference COCOA tests ran (their test_metrics nest under test/results/...).
@@ -2286,42 +2288,134 @@ JETSET_LARGE_ARCH = " ".join(
     for side in ("encoder", "decoder") for k, v in transformer_sizes["large"].items()
 )
 
-def _design(project, cb, cd, nq, cst_fn, extra="", test_extra=""):
-    return dict(project=project, cb=cb, cd=cd, nq=nq, cst_fn=cst_fn, extra=extra, test_extra=test_extra)
+def _design(group, project, cb, cd, nq, cst_fn, extra="", test_extra="", recon_idx=""):
+    return dict(group=group, project=project, cb=cb, cd=cd, nq=nq, cst_fn=cst_fn, extra=extra,
+                test_extra=test_extra, recon_idx=recon_idx)
 
 def _jetset_name(cb, cd, nq, suffix=""):
     return f"transformer_vqvae_enc_large_cb{cb}_cd{cd}_nq{nq}_lr0.0003_cw1.0_nj10000000{suffix}"
 
+TOPO_POSIN_RECON_IDX = (
+    "+callbacks.reconstruction_monitor.deta_idx=0 +callbacks.reconstruction_monitor.dphi_idx=1 "
+    "+callbacks.reconstruction_monitor.energy_idx=2"
+)
+
 design_jetset = {
-    **{_jetset_name(32768, 8, nq): _design("vqvae_scan", 32768, 8, nq, JETSET_CST_FN) for nq in (2, 6, 8)},
-    _jetset_name(32768, 4, 4, "_seed1234"): _design("vqvae_scan", 32768, 4, 4, JETSET_CST_FN, extra="seed=1234"),
+    **{_jetset_name(32768, 8, nq): _design("qscan", "vqvae_scan", 32768, 8, nq, JETSET_CST_FN) for nq in (2, 6, 8)},
+    _jetset_name(32768, 4, 4, "_seed1234"): _design("qscan", "vqvae_scan", 32768, 4, 4, JETSET_CST_FN, extra="seed=1234"),
 }
 design_tracks = {
-    f"cocoa_tracks_cb4096_cd4_nq{nq}_lr0.001": _design("tracks", 4096, 4, nq, COCOA_CST_FN) for nq in (6, 8)
+    f"cocoa_tracks_cb4096_cd4_nq{nq}_lr0.001": _design("qscan", "tracks", 4096, 4, nq, COCOA_CST_FN) for nq in (6, 8)
 }
 design_topos = {
-    f"cocoa_topos_cb4096_cd8_nq{nq}_lr0.001": _design("topos", 4096, 8, nq, COCOA_TOPO_CST_FN) for nq in (6, 8)
+    f"cocoa_topos_cb4096_cd8_nq{nq}_lr0.001": _design("qscan", "topos", 4096, 8, nq, COCOA_TOPO_CST_FN, recon_idx=TOPO_POSIN_RECON_IDX)
+    for nq in (6, 8)
+}
+# Topo repeat spread at the selected point; COCOA splits are by directory, so only the global seed changes.
+for seed in (1234, 5678):
+    design_topos[f"cocoa_topos_cb4096_cd8_nq4_lr0.001_seed{seed}"] = _design(
+        "seed", "topos_seed", 4096, 8, 4, COCOA_TOPO_CST_FN, extra=f"seed={seed}", recon_idx=TOPO_POSIN_RECON_IDX,
+    )
+
+# ── Positions-out: (eta, phi) / (deta, dphi) removed from csts and binned by PositionTokenizer ──
+# Bits stored per element = Q*log2(K) + sum_i log2(n_bins_i): COCOA stores (eta, cos phi, sin phi)
+# = 30 bits (cos/sin redundant: ~2 of the 3 coordinates carry the information); JetSet (deta, dphi) = 20.
+POSOUT_SCALERS = {  # sliced copies of the positions-in scalers, see scripts/slice_scaler.py
+    "cst_quantiles": "1 2",
+    "cocoa_cst_log_standard": "1 2",
+    "cocoa_topo_log_standard": "0 1",
 }
 
-def _design_targets(lookup, root, marker):
-    return [str(root / c["project"] / name / marker) for name, c in lookup.items()]
+def _posout_scaler(stem):
+    return f"{WORKSPACE}/resources/{stem}_posout.joblib"
+
+def _pos_tokenizer(ranges):
+    r = ",".join(f"[{lo},{hi}]" for lo, hi in ranges)
+    return f"'+callbacks.reconstruction_monitor.pos_tokenizer={{_target_:heptokens.models.pos_tokenizer.PositionTokenizer,ranges:[{r}],n_bins:1024}}'"
+
+COCOA_POS_TOKENIZER = _pos_tokenizer([(-3.0, 3.0), (-1.0, 1.0), (-1.0, 1.0)])  # = heptokens-cocoa cocoa_topo_scan.yaml
+JETSET_POS_TOKENIZER = _pos_tokenizer([(-0.5, 0.5), (-0.5, 0.5)])  # |deta|,|dphi| < 0.486 in the training data
+
+with open(WORKSPACE / "configs/datamodule/atlas_mappable.yaml") as _f:
+    _jetset_cst = [f for f in yaml.safe_load(_f)["cst_features"] if f not in ("deta", "dphi")]
+JETSET_POSOUT = (
+    f"'datamodule.cst_features=[{','.join(_jetset_cst)}]' '+datamodule.position_features=[deta,dphi]' "
+    + JETSET_POS_TOKENIZER
+)
+TRACKS_POSOUT = (
+    "'datamodule.features=[track_pt,track_d0,track_z0]' '+datamodule.position_features=[track_eta,track_phi]' "
+    + COCOA_POS_TOKENIZER
+)
+TOPOS_POSOUT = (
+    "'datamodule.features=[topo_e,topo_rho,topo_sigma_eta,topo_sigma_phi,topo_ecal_e,topo_hcal_e]' "
+    "'+datamodule.position_features=[topo_eta,topo_phi]' " + COCOA_POS_TOKENIZER
+)
+
+for cb, cd in product([8192, 16384, 32768], [4, 8, 16]):
+    design_jetset[_jetset_name(cb, cd, 4, "_posout")] = _design(
+        "posout", "vqvae_scan", cb, cd, 4, _posout_scaler("cst_quantiles"),
+        extra=JETSET_POSOUT, test_extra=JETSET_POSOUT,
+    )
+for cb, cd in product([256, 1024, 4096], [2, 4, 8]):
+    design_tracks[f"cocoa_tracks_posout_cb{cb}_cd{cd}_nq4_lr0.001"] = _design(
+        "posout", "tracks_posout", cb, cd, 4, _posout_scaler("cocoa_cst_log_standard"),
+        extra=TRACKS_POSOUT, test_extra=TRACKS_POSOUT,
+    )
+for cb, cd in product([256, 1024, 4096], [4, 8, 12]):
+    design_topos[f"cocoa_topos_posout_cb{cb}_cd{cd}_nq4_lr0.001"] = _design(
+        "posout", "topos_posout", cb, cd, 4, _posout_scaler("cocoa_topo_log_standard"),
+        extra=TOPOS_POSOUT, test_extra=TOPOS_POSOUT,
+        recon_idx="+callbacks.reconstruction_monitor.energy_idx=0",
+    )
+
+def _design_targets(lookup, root, marker, groups):
+    return [str(root / c["project"] / name / marker) for name, c in lookup.items() if c["group"] in groups]
 
 def _design_param(lookup, key):
     return lambda wc: lookup[wc.design_name][key]
 
+def _design_cst_fn_input(lookup):
+    return lambda wc: ancient(lookup[wc.design_name]["cst_fn"])
+
+rule posout_scaler:
+    input:
+        f"{WORKSPACE}/resources/{{stem}}.joblib",
+    output:
+        f"{WORKSPACE}/resources/{{stem}}_posout.joblib",
+    params:
+        drop = lambda wc: POSOUT_SCALERS[wc.stem],
+    wildcard_constraints:
+        stem = "|".join(POSOUT_SCALERS),
+    shell:
+        "pixi run python scripts/slice_scaler.py {input} {output} --drop {params.drop}"
+
 rule all_design_rules:
     input:
-        _design_targets(design_jetset, scan_output_dir, "SUCCESS.txt"),
-        _design_targets(design_tracks, cocoa_output_dir, "SUCCESS.txt"),
-        _design_targets(design_topos, cocoa_output_dir, "SUCCESS.txt"),
+        _design_targets(design_jetset, scan_output_dir, "SUCCESS.txt", ["qscan"]),
+        _design_targets(design_tracks, cocoa_output_dir, "SUCCESS.txt", ["qscan"]),
+        _design_targets(design_topos, cocoa_output_dir, "SUCCESS.txt", ["qscan"]),
 
 rule all_design_rules_test:
     input:
-        _design_targets(design_jetset, scan_output_dir, "TEST_SUCCESS.txt"),
-        _design_targets(design_tracks, cocoa_output_dir, "TEST_SUCCESS.txt"),
-        _design_targets(design_topos, cocoa_output_dir, "TEST_SUCCESS.txt"),
+        _design_targets(design_jetset, scan_output_dir, "TEST_SUCCESS.txt", ["qscan"]),
+        _design_targets(design_tracks, cocoa_output_dir, "TEST_SUCCESS.txt", ["qscan"]),
+        _design_targets(design_topos, cocoa_output_dir, "TEST_SUCCESS.txt", ["qscan"]),
+
+rule all_design_batch2:
+    input:
+        _design_targets(design_jetset, scan_output_dir, "SUCCESS.txt", ["posout", "seed"]),
+        _design_targets(design_tracks, cocoa_output_dir, "SUCCESS.txt", ["posout", "seed"]),
+        _design_targets(design_topos, cocoa_output_dir, "SUCCESS.txt", ["posout", "seed"]),
+
+rule all_design_batch2_test:
+    input:
+        _design_targets(design_jetset, scan_output_dir, "TEST_SUCCESS.txt", ["posout", "seed"]),
+        _design_targets(design_tracks, cocoa_output_dir, "TEST_SUCCESS.txt", ["posout", "seed"]),
+        _design_targets(design_topos, cocoa_output_dir, "TEST_SUCCESS.txt", ["posout", "seed"]),
 
 rule train_design_jetset:
+    input:
+        cst_fn = _design_cst_fn_input(design_jetset),
     output:
         scan_output_dir / "{design_project}/{design_name}/SUCCESS.txt",
         ckpt = scan_output_dir / "{design_project}/{design_name}/checkpoints/best.ckpt",
@@ -2421,6 +2515,8 @@ rule test_design_jetset:
         """
 
 rule train_design_tracks:
+    input:
+        cst_fn = _design_cst_fn_input(design_tracks),
     output:
         cocoa_output_dir / "{design_project}/{design_name}/SUCCESS.txt",
         ckpt = cocoa_output_dir / "{design_project}/{design_name}/checkpoints/best.ckpt",
@@ -2529,6 +2625,8 @@ rule test_design_tracks:
         """
 
 rule train_design_topos:
+    input:
+        cst_fn = _design_cst_fn_input(design_topos),
     output:
         cocoa_output_dir / "{design_project}/{design_name}/SUCCESS.txt",
         ckpt = cocoa_output_dir / "{design_project}/{design_name}/checkpoints/best.ckpt",
@@ -2597,6 +2695,7 @@ rule test_design_topos:
         num_quantizers = _design_param(design_topos, "nq"),
         cst_fn = _design_param(design_topos, "cst_fn"),
         test_extra = _design_param(design_topos, "test_extra"),
+        recon_idx = _design_param(design_topos, "recon_idx"),
         slurm = SLURM,
     wildcard_constraints:
         design_project = "|".join(sorted({c["project"] for c in design_topos.values()})),
@@ -2629,9 +2728,7 @@ rule test_design_topos:
                 test_only=true \
                 callbacks=encode_cocoa \
                 callbacks.reconstruction_monitor.compute_jet_metrics=true \
-                +callbacks.reconstruction_monitor.deta_idx=0 \
-                +callbacks.reconstruction_monitor.dphi_idx=1 \
-                +callbacks.reconstruction_monitor.energy_idx=2 \
+                {params.recon_idx} \
                 +callbacks.reconstruction_monitor.max_batches=100 \
                 trainer.limit_val_batches=100 \
                 trainer.enable_progress_bar=false \
