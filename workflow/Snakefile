@@ -1501,6 +1501,518 @@ rule test_cocoa_truthpart:
         """
 
 # ══════════════════════════════════════════════════════════════════════════════
+# COCOA dataset-size scan (tracks & topos)
+# ══════════════════════════════════════════════════════════════════════════════
+# The main cocoa_scan grid above trains tracks with num_events=null (all ~20M
+# events in train_topup2_20M_cells256) but topos/truthpart capped at 5M — i.e.
+# every modality used one FIXED training-set size, never swept. This section
+# fixes the VQ hyperparameters at one representative operating point per
+# modality and sweeps datamodule.num_events to find where reconstruction
+# quality saturates with dataset size. Max available is ~19.98M events (200
+# files) in train_topup2_20M_cells256.
+cocoa_datascan_sizes = [1_000_000, 5_000_000, 10_000_000]
+cocoa_datascan_op_points = {
+    "tracks": {"cb": 4096, "cd": 4, "nq": 4, "lr": 0.001},
+    "topos":  {"cb": 4096, "cd": 8, "nq": 4, "lr": 0.001},
+}
+
+cocoa_datascan_configs = []
+for modality, op in cocoa_datascan_op_points.items():
+    for n in cocoa_datascan_sizes:
+        name = f"cocoa_{modality}_datascan_n{n}"
+        cocoa_datascan_configs.append({**op, "n": n, "modality": modality, "name": name})
+
+cocoa_datascan_names = {
+    modality: [c["name"] for c in cocoa_datascan_configs if c["modality"] == modality]
+    for modality in cocoa_datascan_op_points
+}
+cocoa_datascan_lookup = {c["name"]: c for c in cocoa_datascan_configs}
+
+rule all_cocoa_datascan:
+    input:
+        expand(cocoa_output_dir / "tracks_datascan/{cocoa_name}/SUCCESS.txt", cocoa_name=cocoa_datascan_names["tracks"]),
+        expand(cocoa_output_dir / "topos_datascan/{cocoa_name}/SUCCESS.txt", cocoa_name=cocoa_datascan_names["topos"]),
+
+rule train_cocoa_tracks_datascan:
+    output:
+        cocoa_output_dir / "tracks_datascan/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "tracks_datascan/{cocoa_name}/checkpoints/best.ckpt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["lr"],
+        num_events = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["n"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_datascan_names["tracks"]),
+    shell:
+        """
+        {params.slurm} -J {wildcards.cocoa_name} \
+            -o {params.output_dir}/tracks_datascan/{wildcards.cocoa_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=tracks_datascan \
+                network_name={wildcards.cocoa_name} \
+                model=transformer_vqvae \
+                datamodule=cocoa_tracks \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events={params.num_events} \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                model.optimizer.lr={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                trainer.max_epochs=50 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode_cocoa \
+                callbacks.early_stopping.patience=15 \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_CST_FN}"
+        """
+
+rule all_cocoa_tracks_datascan_test:
+    input:
+        expand(cocoa_output_dir / "tracks_datascan/{cocoa_name}/TEST_SUCCESS.txt", cocoa_name=cocoa_datascan_names["tracks"]),
+
+rule test_cocoa_tracks_datascan:
+    input:
+        success = cocoa_output_dir / "tracks_datascan/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "tracks_datascan/{cocoa_name}/checkpoints/best.ckpt",
+    output:
+        cocoa_output_dir / "tracks_datascan/{cocoa_name}/TEST_SUCCESS.txt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_datascan_names["tracks"]),
+    shell:
+        """
+        {params.slurm} -J test_{wildcards.cocoa_name} \
+            -o {params.output_dir}/tracks_datascan/{wildcards.cocoa_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=tracks_datascan \
+                network_name={wildcards.cocoa_name}/test \
+                model=transformer_vqvae \
+                datamodule=cocoa_tracks \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=null \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=encode_cocoa \
+                callbacks.reconstruction_monitor.compute_jet_metrics=true \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_CST_FN}"
+        """
+
+rule train_cocoa_topos_datascan:
+    output:
+        cocoa_output_dir / "topos_datascan/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "topos_datascan/{cocoa_name}/checkpoints/best.ckpt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["lr"],
+        num_events = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["n"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_datascan_names["topos"]),
+    shell:
+        """
+        {params.slurm} -J {wildcards.cocoa_name} \
+            -o {params.output_dir}/topos_datascan/{wildcards.cocoa_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=topos_datascan \
+                network_name={wildcards.cocoa_name} \
+                model=transformer_vqvae \
+                datamodule=cocoa_topos \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events={params.num_events} \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                model.optimizer.lr={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                trainer.max_epochs=50 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode_cocoa \
+                callbacks.early_stopping.patience=15 \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_TOPO_CST_FN}"
+        """
+
+rule all_cocoa_topos_datascan_test:
+    input:
+        expand(cocoa_output_dir / "topos_datascan/{cocoa_name}/TEST_SUCCESS.txt", cocoa_name=cocoa_datascan_names["topos"]),
+
+rule test_cocoa_topos_datascan:
+    input:
+        success = cocoa_output_dir / "topos_datascan/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "topos_datascan/{cocoa_name}/checkpoints/best.ckpt",
+    output:
+        cocoa_output_dir / "topos_datascan/{cocoa_name}/TEST_SUCCESS.txt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_datascan_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_datascan_names["topos"]),
+    shell:
+        """
+        {params.slurm} -J test_{wildcards.cocoa_name} \
+            -o {params.output_dir}/topos_datascan/{wildcards.cocoa_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=topos_datascan \
+                network_name={wildcards.cocoa_name}/test \
+                model=transformer_vqvae \
+                datamodule=cocoa_topos \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=100000 \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=encode_cocoa \
+                callbacks.reconstruction_monitor.compute_jet_metrics=true \
+                +callbacks.reconstruction_monitor.deta_idx=0 \
+                +callbacks.reconstruction_monitor.dphi_idx=1 \
+                +callbacks.reconstruction_monitor.energy_idx=2 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_TOPO_CST_FN}"
+        """
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COCOA 10M-event hyperparameter re-scan (tracks & topos, nq={3,4} only)
+# ══════════════════════════════════════════════════════════════════════════════
+# Same cb/cd grid as the main cocoa_scan above, but:
+#   - num_events FIXED at 10,000,000 for both modalities (matches the JetSet
+#     ttbar scan_n_jets=10_000_000 point already in the vqvae_scan grid, and
+#     matches results/cocoa_scan/{tracks,topos}_datascan/*_n10000000).
+#   - nq restricted to {3,4} (dropping nq=2).
+# Everything else (architecture, trainer, callbacks, cst_fn) is byte-for-byte
+# identical to train_cocoa_tracks/train_cocoa_topos above. Separate output dirs
+# (tracks_10M/, topos_10M/) so this does not collide with the existing
+# full-dataset (tracks) / 5M-capped (topos) results.
+cocoa_10M_num_quantizers = [3, 4]
+cocoa_10M_num_events = 10_000_000
+
+cocoa_tracks_10M_configs = []
+for cb, cd, nq, lr in product(
+    cocoa_codebook_sizes, cocoa_codebook_dims, cocoa_10M_num_quantizers, cocoa_learning_rates,
+):
+    name = f"cocoa_tracks_10M_cb{cb}_cd{cd}_nq{nq}_lr{lr}"
+    cocoa_tracks_10M_configs.append({"cb": cb, "cd": cd, "nq": nq, "lr": lr, "name": name})
+
+cocoa_tracks_10M_names = [c["name"] for c in cocoa_tracks_10M_configs]
+cocoa_tracks_10M_lookup = {c["name"]: c for c in cocoa_tracks_10M_configs}
+
+cocoa_topos_10M_configs = []
+for cb, cd, nq, lr in product(
+    cocoa_codebook_sizes, cocoa_topo_codebook_dims, cocoa_10M_num_quantizers, cocoa_learning_rates,
+):
+    name = f"cocoa_topos_10M_cb{cb}_cd{cd}_nq{nq}_lr{lr}"
+    cocoa_topos_10M_configs.append({"cb": cb, "cd": cd, "nq": nq, "lr": lr, "name": name})
+
+cocoa_topos_10M_names = [c["name"] for c in cocoa_topos_10M_configs]
+cocoa_topos_10M_lookup = {c["name"]: c for c in cocoa_topos_10M_configs}
+
+rule all_cocoa_tracks_10M:
+    input:
+        expand(cocoa_output_dir / "tracks_10M/{cocoa_name}/SUCCESS.txt", cocoa_name=cocoa_tracks_10M_names),
+
+rule train_cocoa_tracks_10M:
+    output:
+        cocoa_output_dir / "tracks_10M/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "tracks_10M/{cocoa_name}/checkpoints/best.ckpt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_tracks_10M_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_tracks_10M_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_tracks_10M_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_tracks_10M_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_tracks_10M_names),
+    shell:
+        """
+        {params.slurm} -J {wildcards.cocoa_name} \
+            -o {params.output_dir}/tracks_10M/{wildcards.cocoa_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=tracks_10M \
+                network_name={wildcards.cocoa_name} \
+                model=transformer_vqvae \
+                datamodule=cocoa_tracks \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events={cocoa_10M_num_events} \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                model.optimizer.lr={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                trainer.max_epochs=50 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode_cocoa \
+                callbacks.early_stopping.patience=15 \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_CST_FN}"
+        """
+
+rule all_cocoa_tracks_10M_test:
+    input:
+        expand(cocoa_output_dir / "tracks_10M/{cocoa_name}/TEST_SUCCESS.txt", cocoa_name=cocoa_tracks_10M_names),
+
+rule test_cocoa_tracks_10M:
+    input:
+        success = cocoa_output_dir / "tracks_10M/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "tracks_10M/{cocoa_name}/checkpoints/best.ckpt",
+    output:
+        cocoa_output_dir / "tracks_10M/{cocoa_name}/TEST_SUCCESS.txt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_tracks_10M_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_tracks_10M_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_tracks_10M_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_tracks_10M_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_tracks_10M_names),
+    shell:
+        """
+        {params.slurm} -J test_{wildcards.cocoa_name} \
+            -o {params.output_dir}/tracks_10M/{wildcards.cocoa_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=tracks_10M \
+                network_name={wildcards.cocoa_name}/test \
+                model=transformer_vqvae \
+                datamodule=cocoa_tracks \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=null \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=encode_cocoa \
+                callbacks.reconstruction_monitor.compute_jet_metrics=true \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_CST_FN}"
+        """
+
+rule all_cocoa_topos_10M:
+    input:
+        expand(cocoa_output_dir / "topos_10M/{cocoa_name}/SUCCESS.txt", cocoa_name=cocoa_topos_10M_names),
+
+rule train_cocoa_topos_10M:
+    output:
+        cocoa_output_dir / "topos_10M/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "topos_10M/{cocoa_name}/checkpoints/best.ckpt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_topos_10M_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_topos_10M_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_topos_10M_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_topos_10M_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_topos_10M_names),
+    shell:
+        """
+        {params.slurm} -J {wildcards.cocoa_name} \
+            -o {params.output_dir}/topos_10M/{wildcards.cocoa_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=topos_10M \
+                network_name={wildcards.cocoa_name} \
+                model=transformer_vqvae \
+                datamodule=cocoa_topos \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events={cocoa_10M_num_events} \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                model.optimizer.lr={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                trainer.max_epochs=50 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode_cocoa \
+                callbacks.early_stopping.patience=15 \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_TOPO_CST_FN}"
+        """
+
+rule all_cocoa_topos_10M_test:
+    input:
+        expand(cocoa_output_dir / "topos_10M/{cocoa_name}/TEST_SUCCESS.txt", cocoa_name=cocoa_topos_10M_names),
+
+rule test_cocoa_topos_10M:
+    input:
+        success = cocoa_output_dir / "topos_10M/{cocoa_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "topos_10M/{cocoa_name}/checkpoints/best.ckpt",
+    output:
+        cocoa_output_dir / "topos_10M/{cocoa_name}/TEST_SUCCESS.txt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = lambda wc: cocoa_topos_10M_lookup[wc.cocoa_name]["cb"],
+        codebook_dim = lambda wc: cocoa_topos_10M_lookup[wc.cocoa_name]["cd"],
+        num_quantizers = lambda wc: cocoa_topos_10M_lookup[wc.cocoa_name]["nq"],
+        learning_rate = lambda wc: cocoa_topos_10M_lookup[wc.cocoa_name]["lr"],
+        slurm = SLURM,
+    wildcard_constraints:
+        cocoa_name = "|".join(cocoa_topos_10M_names),
+    shell:
+        """
+        {params.slurm} -J test_{wildcards.cocoa_name} \
+            -o {params.output_dir}/topos_10M/{wildcards.cocoa_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name=topos_10M \
+                network_name={wildcards.cocoa_name}/test \
+                model=transformer_vqvae \
+                datamodule=cocoa_topos \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=100000 \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate={params.learning_rate} \
+                +model.commitment_weight=1.0 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=encode_cocoa \
+                callbacks.reconstruction_monitor.compute_jet_metrics=true \
+                +callbacks.reconstruction_monitor.deta_idx=0 \
+                +callbacks.reconstruction_monitor.dphi_idx=1 \
+                +callbacks.reconstruction_monitor.energy_idx=2 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.cst_fn.filename={COCOA_TOPO_CST_FN}"
+        """
+
+# ══════════════════════════════════════════════════════════════════════════════
 # JetSet Dataset Tokenization (existing)
 # ══════════════════════════════════════════════════════════════════════════════
 rule tokenize_all:
@@ -1549,4 +2061,213 @@ rule tokenize_dataset:
                     datamodule.transforms.preprocess.cst_fn.filename=/sdf/data/atlas/u/jkrupa/heptokens/resources/cst_quantiles.joblib \
                     datamodule.transforms.preprocess.jet_fn.filename=/sdf/data/atlas/u/jkrupa/heptokens/resources/jet_quantiles.joblib
             '
+        """
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COCOA pflow input-tokenizer sweep — EVAL + PANEL
+# ══════════════════════════════════════════════════════════════════════════════
+# The full sweep is now Snakemake-managed end to end:
+#   export_pflow_point : re-tokenize track+topo (cs tokenizer) + truthpart into the
+#                        per-point preprocessed_dir (scripts/pflow_export_point.sh).
+#   train_pflow_point  : generate per-point configs + train the 4M
+#                        (scripts/pflow_train_point.sh); auto glob-discovered ckpts.
+#   eval_pflow_point   : 3-stage eval of ONE trained point (scripts/pflow_eval_point.sh)
+#                        -> cs<cs>/eval/{metrics.json, token_metrics.json};
+#                        auto-picks the best-val 4M checkpoint (lowest val_total_loss).
+#   pflow_sweep_panel  : aggregate all points -> sweep_metrics.csv + sweep_panel.png.
+# The old scripts/pflow_input_sweep.sh (one sbatch afterok chain per cs) remains for
+# manual use; export/train here run the byte-identical commands split into two scripts.
+# Adjust the grid with, e.g.:  --config pflow_sweep_cs='[64,256,1024,4096]'
+# 4M pflow outputs (checkpoints + wandb) live on ddn group space, not the small
+# 200G /sdf/data/atlas volume. Exports already live on ddn (PFLOW_SWEEP_TOK_ROOT).
+PFLOW_SWEEP_ROOT  = Path("/fs/ddn/sdf/group/atlas/d/jkrupa/hep4m_pflow_sweep")
+# codebook_dim is per-modality: it only selects which pretrained tokenizer ckpt to
+# load (the 4M consumes token indices, not cd-dim vectors, and info_fraction ignores
+# cd), so track/topo need not match. Defaults = per-modality optima (track cd=4,
+# topo cd=8). Override with --config pflow_track_cd=8 pflow_topo_cd=8 for the old run.
+PFLOW_SWEEP_CD_TRACK = config.get("pflow_track_cd", 4)
+PFLOW_SWEEP_CD_TOPO  = config.get("pflow_topo_cd", 8)
+PFLOW_SWEEP_NQ    = config.get("pflow_nq", 4)
+pflow_sweep_cs    = config.get("pflow_sweep_cs", [64, 256, 1024, 4096])
+PFLOW_EVAL_REDUCE = config.get("pflow_eval_reduce", -1)   # val events for eval (-1 = all)
+PFLOW_TRAIN_EPOCHS = config.get("pflow_train_epochs", 300)      # 4M num_epochs (cap; early stopping ends training)
+PFLOW_TRAIN_PATIENCE = config.get("pflow_train_patience", 3)  # epochs without val_total_loss improvement
+PFLOW_TRAIN_N      = config.get("pflow_train_num_events", "all")  # 4M train export size; "all" = full ~20M split
+PFLOW_SWEEP_TOK_ROOT = "/fs/ddn/sdf/group/atlas/d/jkrupa/hep4m_sweep"
+# Per-sweep tag: outputs/exports/configs are namespaced under it so runs with
+# different nq/cd don't collide (the pre-existing untagged nq3/cd8 sweep stays put).
+PFLOW_TAG = config.get("pflow_tag", f"nq{PFLOW_SWEEP_NQ}_trkcd{PFLOW_SWEEP_CD_TRACK}_topocd{PFLOW_SWEEP_CD_TOPO}")
+PFLOW_SWEEP_DIR = PFLOW_SWEEP_ROOT / PFLOW_TAG
+PFLOW_TOK_DIR   = PFLOW_SWEEP_TOK_ROOT + "/" + PFLOW_TAG
+# Export runs the heptokens env; train runs the HEP4M env (script cd's to $HEP4M).
+PFLOW_EXPORT_SLURM = f"sbatch --wait -A {SLURM_ACCOUNT} -p {SLURM_PARTITION} -t 480 --mem=100G --gres=gpu:1 --cpus-per-task=8 -D {WORKSPACE}"
+PFLOW_TRAIN_SLURM  = f"sbatch --wait -A {SLURM_ACCOUNT} -p {SLURM_PARTITION} -t 7000 --mem=100G --gres=gpu:1 --cpus-per-task=8 -D {WORKSPACE}"
+
+def _pflow_track_ckpt(wc):
+    return cocoa_output_dir / f"tracks/cocoa_tracks_cb{wc.cs}_cd{PFLOW_SWEEP_CD_TRACK}_nq{PFLOW_SWEEP_NQ}_lr0.001/checkpoints/best.ckpt"
+
+def _pflow_topo_ckpt(wc):
+    return cocoa_output_dir / f"topos/cocoa_topos_cb{wc.cs}_cd{PFLOW_SWEEP_CD_TOPO}_nq{PFLOW_SWEEP_NQ}_lr0.001/checkpoints/best.ckpt"
+
+PFLOW_TRUTHPART_CKPT = cocoa_output_dir / "truthpart/cocoa_truthpart_cb128_cd8_nq3_lr0.001/checkpoints/best.ckpt"
+
+rule all_pflow_sweep_eval:
+    input:
+        PFLOW_SWEEP_DIR / "sweep_panel.png",
+
+rule all_pflow_sweep_train:
+    input:
+        expand(str(PFLOW_SWEEP_DIR / "cs{cs}/TRAIN_SUCCESS.txt"), cs=pflow_sweep_cs),
+
+rule export_pflow_point:
+    input:
+        track_ckpt = _pflow_track_ckpt,
+        topo_ckpt = _pflow_topo_ckpt,
+    output:
+        marker = PFLOW_TOK_DIR + "/cs{cs}/EXPORT_SUCCESS.txt",
+    params:
+        slurm = PFLOW_EXPORT_SLURM,
+        train_n = PFLOW_TRAIN_N,
+        nq = PFLOW_SWEEP_NQ,
+        track_cd = PFLOW_SWEEP_CD_TRACK,
+        topo_cd = PFLOW_SWEEP_CD_TOPO,
+        tag = PFLOW_TAG,
+    wildcard_constraints:
+        cs = "|".join(str(c) for c in pflow_sweep_cs),
+    shell:
+        """
+        mkdir -p {PFLOW_TOK_DIR}/cs{wildcards.cs} && \
+        {params.slurm} -J pflow_export_{params.tag}_cs{wildcards.cs} \
+            -o {PFLOW_TOK_DIR}/cs{wildcards.cs}/slurm_export_%j.log \
+            --wrap="bash {WORKSPACE}/scripts/pflow_export_point.sh {wildcards.cs} {params.tag} {params.nq} {params.track_cd} {params.topo_cd} {params.train_n}"
+        """
+
+rule train_pflow_point:
+    input:
+        export = PFLOW_TOK_DIR + "/cs{cs}/EXPORT_SUCCESS.txt",
+        track_ckpt = _pflow_track_ckpt,
+        topo_ckpt = _pflow_topo_ckpt,
+        truthpart_ckpt = ancient(PFLOW_TRUTHPART_CKPT),
+    output:
+        marker = PFLOW_SWEEP_DIR / "cs{cs}/TRAIN_SUCCESS.txt",
+    params:
+        slurm = PFLOW_TRAIN_SLURM,
+        epochs = PFLOW_TRAIN_EPOCHS,
+        patience = PFLOW_TRAIN_PATIENCE,
+        nq = PFLOW_SWEEP_NQ,
+        track_cd = PFLOW_SWEEP_CD_TRACK,
+        topo_cd = PFLOW_SWEEP_CD_TOPO,
+        tag = PFLOW_TAG,
+    wildcard_constraints:
+        cs = "|".join(str(c) for c in pflow_sweep_cs),
+    shell:
+        """
+        mkdir -p {PFLOW_SWEEP_DIR}/cs{wildcards.cs} && \
+        {params.slurm} -J pflow_train_{params.tag}_cs{wildcards.cs} \
+            -o {PFLOW_SWEEP_DIR}/cs{wildcards.cs}/slurm_train_%j.log \
+            --wrap="bash {WORKSPACE}/scripts/pflow_train_point.sh {wildcards.cs} {params.tag} {params.nq} {params.track_cd} {params.topo_cd} {params.epochs} {params.patience}"
+        """
+
+rule eval_pflow_point:
+    input:
+        train = PFLOW_SWEEP_DIR / "cs{cs}/TRAIN_SUCCESS.txt",
+    output:
+        metrics = PFLOW_SWEEP_DIR / "cs{cs}/eval/metrics.json",
+    params:
+        slurm = SLURM,
+        reduce = PFLOW_EVAL_REDUCE,
+        tag = PFLOW_TAG,
+    wildcard_constraints:
+        cs = "|".join(str(c) for c in pflow_sweep_cs),
+    shell:
+        """
+        {params.slurm} -J pflow_eval_{params.tag}_cs{wildcards.cs} \
+            -o {PFLOW_SWEEP_DIR}/cs{wildcards.cs}/eval/slurm_eval_%j.log \
+            --wrap="bash {WORKSPACE}/scripts/pflow_eval_point.sh {wildcards.cs} {params.tag} {params.reduce}"
+        """
+
+rule pflow_sweep_panel:
+    input:
+        expand(str(PFLOW_SWEEP_DIR / "cs{cs}/eval/metrics.json"), cs=pflow_sweep_cs),
+    output:
+        png = PFLOW_SWEEP_DIR / "sweep_panel.png",
+        csv = PFLOW_SWEEP_DIR / "sweep_metrics.csv",
+    params:
+        cs = " ".join(str(c) for c in pflow_sweep_cs),
+    shell:
+        """
+        pixi run python scripts/pflow_sweep_panel.py \
+            --sweep_root {PFLOW_SWEEP_DIR} --cs {params.cs} \
+            --cd {PFLOW_SWEEP_CD_TOPO} --nq {PFLOW_SWEEP_NQ} \
+            --out_csv {output.csv} --out_png {output.png}
+        """
+
+# ---- continuous-input pflow: raw (scaled) track/topo features through an MLP input head ----
+# Trunk, truthpart target and eval are unchanged. The cs{PFLOW_CONT_CS} token export is reused
+# only for row offsets/event numbers; {mod}_cont.npy is added next to it.
+PFLOW_CONT_HIDDEN = str(config.get("pflow_cont_hidden", "256"))   # comma-separated, no spaces
+PFLOW_CONT_TAG = config.get("pflow_cont_tag", f"cont_mlp{PFLOW_CONT_HIDDEN.replace(',', 'x')}")
+PFLOW_CONT_CS = config.get("pflow_cont_cs", 1024)
+PFLOW_CONT_PP = f"{PFLOW_TOK_DIR}/cs{PFLOW_CONT_CS}"
+PFLOW_CONT_DIR = PFLOW_SWEEP_ROOT / PFLOW_CONT_TAG / f"cs{PFLOW_CONT_CS}"
+
+rule all_pflow_cont:
+    input:
+        PFLOW_CONT_DIR / "eval/metrics.json",
+
+rule export_pflow_cont:
+    input:
+        export = PFLOW_CONT_PP + "/EXPORT_SUCCESS.txt",
+    output:
+        marker = PFLOW_CONT_PP + "/CONT_EXPORT_SUCCESS.txt",
+    params:
+        slurm = PFLOW_EXPORT_SLURM,
+        pp = PFLOW_CONT_PP,
+        cmd = f"pixi run --manifest-path {WORKSPACE}/pyproject.toml python {WORKSPACE}/scripts/build_hep4m_preprocessed.py --cont_only --modalities track topo --num_workers 8 --output_dir {PFLOW_CONT_PP}",
+    shell:
+        """
+        {params.slurm} -J pflow_cont_export \
+            -o {params.pp}/slurm_cont_export_%j.log \
+            --wrap="{params.cmd} --split_dir val_100K_cells256 --split_name val && \
+                    {params.cmd} --split_dir train_topup2_20M_cells256 --split_name train && \
+                    touch {output.marker}"
+        """
+
+rule train_pflow_cont:
+    input:
+        export = PFLOW_CONT_PP + "/CONT_EXPORT_SUCCESS.txt",
+        truthpart_ckpt = ancient(PFLOW_TRUTHPART_CKPT),
+    output:
+        marker = PFLOW_CONT_DIR / "TRAIN_SUCCESS.txt",
+    params:
+        slurm = PFLOW_TRAIN_SLURM,
+        env = f"PFLOW_PP_DIR={PFLOW_CONT_PP} PFLOW_INPUT_REPR=continuous PFLOW_CONT_HIDDEN={PFLOW_CONT_HIDDEN}",
+        args = f"{PFLOW_CONT_CS} {PFLOW_CONT_TAG} {PFLOW_SWEEP_NQ} {PFLOW_SWEEP_CD_TRACK} {PFLOW_SWEEP_CD_TOPO} {PFLOW_TRAIN_EPOCHS} {PFLOW_TRAIN_PATIENCE}",
+        tag = PFLOW_CONT_TAG,
+        outdir = PFLOW_CONT_DIR,
+    shell:
+        """
+        mkdir -p {params.outdir} && \
+        {params.slurm} -J pflow_train_{params.tag} \
+            -o {params.outdir}/slurm_train_%j.log \
+            --wrap="{params.env} bash {WORKSPACE}/scripts/pflow_train_point.sh {params.args}"
+        """
+
+rule eval_pflow_cont:
+    input:
+        train = PFLOW_CONT_DIR / "TRAIN_SUCCESS.txt",
+    output:
+        metrics = PFLOW_CONT_DIR / "eval/metrics.json",
+    params:
+        slurm = SLURM,
+        env = f"PFLOW_PP_DIR={PFLOW_CONT_PP}",
+        args = f"{PFLOW_CONT_CS} {PFLOW_CONT_TAG} {PFLOW_EVAL_REDUCE}",
+        tag = PFLOW_CONT_TAG,
+        outdir = PFLOW_CONT_DIR,
+    shell:
+        """
+        mkdir -p {params.outdir}/eval && \
+        {params.slurm} -J pflow_eval_{params.tag} \
+            -o {params.outdir}/eval/slurm_eval_%j.log \
+            --wrap="{params.env} bash {WORKSPACE}/scripts/pflow_eval_point.sh {params.args}"
         """
