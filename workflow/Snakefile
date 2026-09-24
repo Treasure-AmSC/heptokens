@@ -2271,3 +2271,370 @@ rule eval_pflow_cont:
             -o {params.outdir}/eval/slurm_eval_%j.log \
             --wrap="{params.env} bash {WORKSPACE}/scripts/pflow_eval_point.sh {params.args}"
         """
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Design-rules figure: explicit run lists (not grid extensions)
+# ══════════════════════════════════════════════════════════════════════════════
+# Shells are copies of train_tokenizer/test_tokenizer and train/test_cocoa_{tracks,topos}
+# with cst_fn and free-form `extra` / `test_extra` override slots (empty unless needed).
+JETSET_CST_FN = f"{WORKSPACE}/resources/cst_quantiles.joblib"
+JETSET_JET_FN = f"{WORKSPACE}/resources/jet_quantiles.joblib"
+# Relative, as the reference COCOA tests ran (their test_metrics nest under test/results/...).
+COCOA_TEST_OUTPUT_DIR = "results/cocoa_scan"
+JETSET_LARGE_ARCH = " ".join(
+    f"model.{side}.model.{k}={v}"
+    for side in ("encoder", "decoder") for k, v in transformer_sizes["large"].items()
+)
+
+def _design(project, cb, cd, nq, cst_fn, extra="", test_extra=""):
+    return dict(project=project, cb=cb, cd=cd, nq=nq, cst_fn=cst_fn, extra=extra, test_extra=test_extra)
+
+def _jetset_name(cb, cd, nq, suffix=""):
+    return f"transformer_vqvae_enc_large_cb{cb}_cd{cd}_nq{nq}_lr0.0003_cw1.0_nj10000000{suffix}"
+
+design_jetset = {
+    **{_jetset_name(32768, 8, nq): _design("vqvae_scan", 32768, 8, nq, JETSET_CST_FN) for nq in (2, 6, 8)},
+    _jetset_name(32768, 4, 4, "_seed1234"): _design("vqvae_scan", 32768, 4, 4, JETSET_CST_FN, extra="seed=1234"),
+}
+design_tracks = {
+    f"cocoa_tracks_cb4096_cd4_nq{nq}_lr0.001": _design("tracks", 4096, 4, nq, COCOA_CST_FN) for nq in (6, 8)
+}
+design_topos = {
+    f"cocoa_topos_cb4096_cd8_nq{nq}_lr0.001": _design("topos", 4096, 8, nq, COCOA_TOPO_CST_FN) for nq in (6, 8)
+}
+
+def _design_targets(lookup, root, marker):
+    return [str(root / c["project"] / name / marker) for name, c in lookup.items()]
+
+def _design_param(lookup, key):
+    return lambda wc: lookup[wc.design_name][key]
+
+rule all_design_rules:
+    input:
+        _design_targets(design_jetset, scan_output_dir, "SUCCESS.txt"),
+        _design_targets(design_tracks, cocoa_output_dir, "SUCCESS.txt"),
+        _design_targets(design_topos, cocoa_output_dir, "SUCCESS.txt"),
+
+rule all_design_rules_test:
+    input:
+        _design_targets(design_jetset, scan_output_dir, "TEST_SUCCESS.txt"),
+        _design_targets(design_tracks, cocoa_output_dir, "TEST_SUCCESS.txt"),
+        _design_targets(design_topos, cocoa_output_dir, "TEST_SUCCESS.txt"),
+
+rule train_design_jetset:
+    output:
+        scan_output_dir / "{design_project}/{design_name}/SUCCESS.txt",
+        ckpt = scan_output_dir / "{design_project}/{design_name}/checkpoints/best.ckpt",
+    params:
+        output_dir = scan_output_dir,
+        codebook_size = _design_param(design_jetset, "cb"),
+        codebook_dim = _design_param(design_jetset, "cd"),
+        num_quantizers = _design_param(design_jetset, "nq"),
+        cst_fn = _design_param(design_jetset, "cst_fn"),
+        extra = _design_param(design_jetset, "extra"),
+        slurm = SLURM,
+    wildcard_constraints:
+        design_project = "|".join(sorted({c["project"] for c in design_jetset.values()})),
+        design_name = "|".join(design_jetset),
+    shell:
+        """
+        {params.slurm} -J {wildcards.design_name} \
+            -o {params.output_dir}/{wildcards.design_project}/{wildcards.design_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name={wildcards.design_project} \
+                network_name={wildcards.design_name} \
+                model=transformer_vqvae \
+                datamodule=atlas_mappable \
+                datamodule.num_jets=10000000 \
+                {JETSET_LARGE_ARCH} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate=0.0003 \
+                model.optimizer.lr=0.0003 \
+                +model.commitment_weight=1.0 \
+                trainer.max_epochs=200 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.jet_fn.filename='{JETSET_JET_FN}' \
+                datamodule.transforms.preprocess.cst_fn.filename='{params.cst_fn}' \
+                {params.extra}"
+        """
+
+rule test_design_jetset:
+    input:
+        success = scan_output_dir / "{design_project}/{design_name}/SUCCESS.txt",
+        ckpt = scan_output_dir / "{design_project}/{design_name}/checkpoints/best.ckpt",
+    output:
+        scan_output_dir / "{design_project}/{design_name}/TEST_SUCCESS.txt",
+    params:
+        output_dir = scan_output_dir,
+        codebook_size = _design_param(design_jetset, "cb"),
+        codebook_dim = _design_param(design_jetset, "cd"),
+        num_quantizers = _design_param(design_jetset, "nq"),
+        cst_fn = _design_param(design_jetset, "cst_fn"),
+        test_extra = _design_param(design_jetset, "test_extra"),
+        slurm = SLURM,
+    wildcard_constraints:
+        design_project = "|".join(sorted({c["project"] for c in design_jetset.values()})),
+        design_name = "|".join(design_jetset),
+    shell:
+        """
+        {params.slurm} -J test_{wildcards.design_name} \
+            -o {params.output_dir}/{wildcards.design_project}/{wildcards.design_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name={wildcards.design_project} \
+                network_name={wildcards.design_name}/test \
+                model=transformer_vqvae \
+                datamodule=atlas_iterable \
+                datamodule.data_path=/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-small.h5 \
+                datamodule.train_frac=0.001 \
+                datamodule.num_workers=0 \
+                datamodule.val_frac=0.001 \
+                datamodule.test_frac=0.998 \
+                datamodule.num_workers=2 \
+                datamodule.num_csts=40 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                {JETSET_LARGE_ARCH} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate=0.0003 \
+                +model.commitment_weight=1.0 \
+                callbacks=encode \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.jet_fn.filename='{JETSET_JET_FN}' \
+                datamodule.transforms.preprocess.cst_fn.filename='{params.cst_fn}' \
+                {params.test_extra}"
+        """
+
+rule train_design_tracks:
+    output:
+        cocoa_output_dir / "{design_project}/{design_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "{design_project}/{design_name}/checkpoints/best.ckpt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = _design_param(design_tracks, "cb"),
+        codebook_dim = _design_param(design_tracks, "cd"),
+        num_quantizers = _design_param(design_tracks, "nq"),
+        cst_fn = _design_param(design_tracks, "cst_fn"),
+        extra = _design_param(design_tracks, "extra"),
+        slurm = SLURM,
+    wildcard_constraints:
+        design_project = "|".join(sorted({c["project"] for c in design_tracks.values()})),
+        design_name = "|".join(design_tracks),
+    shell:
+        """
+        {params.slurm} -J {wildcards.design_name} \
+            -o {params.output_dir}/{wildcards.design_project}/{wildcards.design_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name={wildcards.design_project} \
+                network_name={wildcards.design_name} \
+                model=transformer_vqvae \
+                datamodule=cocoa_tracks \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=null \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate=0.001 \
+                model.optimizer.lr=0.001 \
+                +model.commitment_weight=1.0 \
+                trainer.max_epochs=50 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode_cocoa \
+                callbacks.early_stopping.patience=15 \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.cst_fn.filename={params.cst_fn} \
+                {params.extra}"
+        """
+
+rule test_design_tracks:
+    input:
+        success = cocoa_output_dir / "{design_project}/{design_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "{design_project}/{design_name}/checkpoints/best.ckpt",
+    output:
+        cocoa_output_dir / "{design_project}/{design_name}/TEST_SUCCESS.txt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = _design_param(design_tracks, "cb"),
+        codebook_dim = _design_param(design_tracks, "cd"),
+        num_quantizers = _design_param(design_tracks, "nq"),
+        cst_fn = _design_param(design_tracks, "cst_fn"),
+        test_extra = _design_param(design_tracks, "test_extra"),
+        slurm = SLURM,
+    wildcard_constraints:
+        design_project = "|".join(sorted({c["project"] for c in design_tracks.values()})),
+        design_name = "|".join(design_tracks),
+    shell:
+        """
+        {params.slurm} -J test_{wildcards.design_name} \
+            -o {params.output_dir}/{wildcards.design_project}/{wildcards.design_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={COCOA_TEST_OUTPUT_DIR} \
+                project_name={wildcards.design_project} \
+                network_name={wildcards.design_name}/test \
+                model=transformer_vqvae \
+                datamodule=cocoa_tracks \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=100000 \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate=0.001 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=encode_cocoa \
+                callbacks.reconstruction_monitor.compute_jet_metrics=true \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.cst_fn.filename={params.cst_fn} \
+                {params.test_extra}"
+        """
+
+rule train_design_topos:
+    output:
+        cocoa_output_dir / "{design_project}/{design_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "{design_project}/{design_name}/checkpoints/best.ckpt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = _design_param(design_topos, "cb"),
+        codebook_dim = _design_param(design_topos, "cd"),
+        num_quantizers = _design_param(design_topos, "nq"),
+        cst_fn = _design_param(design_topos, "cst_fn"),
+        extra = _design_param(design_topos, "extra"),
+        slurm = SLURM,
+    wildcard_constraints:
+        design_project = "|".join(sorted({c["project"] for c in design_topos.values()})),
+        design_name = "|".join(design_topos),
+    shell:
+        """
+        {params.slurm} -J {wildcards.design_name} \
+            -o {params.output_dir}/{wildcards.design_project}/{wildcards.design_name}/slurm_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name={wildcards.design_project} \
+                network_name={wildcards.design_name} \
+                model=transformer_vqvae \
+                datamodule=cocoa_topos \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=5000000 \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate=0.001 \
+                model.optimizer.lr=0.001 \
+                +model.commitment_weight=1.0 \
+                trainer.max_epochs=50 \
+                trainer.check_val_every_n_epoch=1 \
+                trainer.val_check_interval=1.0 \
+                trainer.limit_val_batches=1.0 \
+                +trainer.num_sanity_val_steps=0 \
+                trainer.gradient_clip_val=1.0 \
+                trainer.enable_progress_bar=false \
+                callbacks=encode_cocoa \
+                callbacks.early_stopping.patience=15 \
+                callbacks.reconstruction_monitor.log_every_n_epochs=5 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                datamodule.transforms.preprocess.cst_fn.filename={params.cst_fn} \
+                {params.extra}"
+        """
+
+rule test_design_topos:
+    input:
+        success = cocoa_output_dir / "{design_project}/{design_name}/SUCCESS.txt",
+        ckpt = cocoa_output_dir / "{design_project}/{design_name}/checkpoints/best.ckpt",
+    output:
+        cocoa_output_dir / "{design_project}/{design_name}/TEST_SUCCESS.txt",
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = _design_param(design_topos, "cb"),
+        codebook_dim = _design_param(design_topos, "cd"),
+        num_quantizers = _design_param(design_topos, "nq"),
+        cst_fn = _design_param(design_topos, "cst_fn"),
+        test_extra = _design_param(design_topos, "test_extra"),
+        slurm = SLURM,
+    wildcard_constraints:
+        design_project = "|".join(sorted({c["project"] for c in design_topos.values()})),
+        design_name = "|".join(design_topos),
+    shell:
+        """
+        {params.slurm} -J test_{wildcards.design_name} \
+            -o {params.output_dir}/{wildcards.design_project}/{wildcards.design_name}/slurm_test_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={COCOA_TEST_OUTPUT_DIR} \
+                project_name={wildcards.design_project} \
+                network_name={wildcards.design_name}/test \
+                model=transformer_vqvae \
+                datamodule=cocoa_topos \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=100000 \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate=0.001 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=encode_cocoa \
+                callbacks.reconstruction_monitor.compute_jet_metrics=true \
+                +callbacks.reconstruction_monitor.deta_idx=0 \
+                +callbacks.reconstruction_monitor.dphi_idx=1 \
+                +callbacks.reconstruction_monitor.energy_idx=2 \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.cst_fn.filename={params.cst_fn} \
+                {params.test_extra}"
+        """
