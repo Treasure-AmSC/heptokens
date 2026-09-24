@@ -20,6 +20,9 @@ class ReconstructionMonitor(Callback):
         cst_fn: Fitted transformer for constituents (e.g., QuantileTransformer)
         jet_fn: Fitted transformer for jets (e.g., QuantileTransformer)
         log_every_n_epochs: How often to compute unscaled metrics (default: 1)
+        pos_tokenizer: PositionTokenizer for positions-out data (batch carries a separate
+            ``positions`` tensor). Truth jets use the exact positions, reco jets the binned
+            ones. Required iff the batch has ``positions``.
     """
 
     def __init__(
@@ -41,10 +44,12 @@ class ReconstructionMonitor(Callback):
         iqr_med_pt_max: float = 140_000.0,
         iqr_med_n_bins: int = 20,
         iqr_med_min_entries_per_bin: int = 10,
+        pos_tokenizer=None,
     ):
         super().__init__()
         self.cst_fn = cst_fn
         self.jet_fn = jet_fn
+        self.pos_tokenizer = pos_tokenizer
         self.log_every_n_epochs = log_every_n_epochs
         self.max_batches = max_batches
         self.pt_idx = pt_idx
@@ -141,10 +146,63 @@ class ReconstructionMonitor(Callback):
         dphi = phi1 - phi2
         return np.arctan2(np.sin(dphi), np.cos(dphi))
 
+    def _directions_from_positions(self, positions, jets=None):
+        """(eta, cos phi, sin phi) per constituent from a separate ``positions`` tensor.
+
+        positions: [..., 3] absolute (eta, cos phi, sin phi), or [..., 2] (deta, dphi)
+        relative to the jet axis taken from ``jets``.
+        """
+        pos = positions.cpu().numpy()
+        if pos.shape[-1] == 3:
+            return pos[..., 0], pos[..., 1], pos[..., 2]
+        if pos.shape[-1] != 2:
+            raise ValueError(f"positions must have 2 or 3 columns, got {pos.shape[-1]}")
+        if jets is None:
+            raise ValueError("(deta, dphi) positions need a 'jets' tensor for the jet axis")
+        etas = pos[..., 0] + jets[:, self.jet_eta_idx].cpu().numpy()[:, None]
+        phis = self._delta_phi(pos[..., 1] + jets[:, self.jet_phi_idx].cpu().numpy()[:, None], 0.0)
+        return etas, np.cos(phis), np.sin(phis)
+
+    def _compute_jet_from_positions(self, csts, etas, cosphis, sinphis, mask):
+        """Jet 4-vector with directions from positions; same formula as heptokens-cocoa's
+        TopoReconstructionMonitor._compute_jet_from_clusters."""
+        if self.energy_idx is not None:
+            pts = csts[:, :, self.energy_idx].cpu().numpy() / np.cosh(etas)
+        else:
+            pts = csts[:, :, self.pt_idx].cpu().numpy()
+
+        pxs = pts * cosphis
+        pys = pts * sinphis
+        pzs = pts * np.sinh(etas)
+        energies = pts * np.cosh(etas)
+
+        mask_np = mask.cpu().numpy()
+        jet_px = np.sum(np.where(mask_np, pxs, 0), axis=-1)
+        jet_py = np.sum(np.where(mask_np, pys, 0), axis=-1)
+        jet_pz = np.sum(np.where(mask_np, pzs, 0), axis=-1)
+        jet_pt = np.sqrt(jet_px**2 + jet_py**2)
+        jet_pt = np.where(jet_pt == 0, 1e-10, jet_pt)
+        jet_eta = np.arcsinh(jet_pz / jet_pt)
+        jet_phi = np.arctan2(jet_py, jet_px)
+
+        jet_e = np.sum(np.where(mask_np, energies, 0), axis=-1)
+        jet_m2 = jet_e**2 - (jet_px**2 + jet_py**2 + jet_pz**2)
+        jet_mass = np.sqrt(np.clip(jet_m2, 0.0, None))
+
+        return {"pt": jet_pt, "mass": jet_mass, "eta": jet_eta, "phi": jet_phi}
+
     def _on_batch_end(self, trainer, pl_module, batch, batch_idx, stage="val"):
         """Shared logic for computing metrics in original space."""
         if batch_idx >= self.max_batches:
             return
+
+        has_positions = "positions" in batch
+        if self.pos_tokenizer is not None and not has_positions:
+            raise ValueError("pos_tokenizer is set but the batch has no 'positions' tensor")
+        if has_positions and self.pos_tokenizer is None:
+            raise ValueError(
+                "batch has a 'positions' tensor (positions-out data) but no pos_tokenizer is set"
+            )
 
         # Get reconstructions
         with T.no_grad():
@@ -200,12 +258,22 @@ class ReconstructionMonitor(Callback):
             }
             """
             jets_for_offset = original_unscaled.get("jets")
-            jet_truth = self._compute_jet_from_constituents(
-                original_unscaled["csts"], mask, jets_for_offset
-            )
-            jet_reco = self._compute_jet_from_constituents(
-                recon_unscaled["csts"], mask, jets_for_offset
-            )
+            if has_positions:
+                pos_truth = batch["positions"].cpu()
+                pos_reco = self.pos_tokenizer.decode(self.pos_tokenizer(pos_truth))
+                dir_truth = self._directions_from_positions(pos_truth, jets_for_offset)
+                dir_reco = self._directions_from_positions(pos_reco, jets_for_offset)
+                jet_truth = self._compute_jet_from_positions(
+                    original_unscaled["csts"], *dir_truth, mask
+                )
+                jet_reco = self._compute_jet_from_positions(recon_unscaled["csts"], *dir_reco, mask)
+            else:
+                jet_truth = self._compute_jet_from_constituents(
+                    original_unscaled["csts"], mask, jets_for_offset
+                )
+                jet_reco = self._compute_jet_from_constituents(
+                    recon_unscaled["csts"], mask, jets_for_offset
+                )
 
             # Compute pt residuals and radial distance
             pt_residuals = jet_truth["pt"] - jet_reco["pt"]
@@ -247,16 +315,22 @@ class ReconstructionMonitor(Callback):
 
             # Compute mean radial distance in (deta, dphi) space
             mask_np = mask.cpu().numpy()
-            original_valid = original_unscaled["csts"][mask_np]
-            recon_valid = recon_unscaled["csts"][mask_np]
-            original_deta = original_valid[:, self.deta_idx].cpu().numpy()
-            original_dphi = original_valid[:, self.dphi_idx].cpu().numpy()
-            recon_deta = recon_valid[:, self.deta_idx].cpu().numpy()
-            recon_dphi = recon_valid[:, self.dphi_idx].cpu().numpy()
+            if has_positions:
+                eta_t, cos_t, sin_t = (a[mask_np] for a in dir_truth)
+                eta_r, cos_r, sin_r = (a[mask_np] for a in dir_reco)
+                dphi = np.arctan2(sin_t * cos_r - cos_t * sin_r, cos_t * cos_r + sin_t * sin_r)
+                radial_distance = np.sqrt((eta_t - eta_r) ** 2 + dphi**2)
+            else:
+                original_valid = original_unscaled["csts"][mask_np]
+                recon_valid = recon_unscaled["csts"][mask_np]
+                original_deta = original_valid[:, self.deta_idx].cpu().numpy()
+                original_dphi = original_valid[:, self.dphi_idx].cpu().numpy()
+                recon_deta = recon_valid[:, self.deta_idx].cpu().numpy()
+                recon_dphi = recon_valid[:, self.dphi_idx].cpu().numpy()
 
-            radial_distance = np.sqrt(
-                (original_deta - recon_deta) ** 2 + (original_dphi - recon_dphi) ** 2
-            )
+                radial_distance = np.sqrt(
+                    (original_deta - recon_deta) ** 2 + (original_dphi - recon_dphi) ** 2
+                )
 
             residuals = {
                 "pt": pt_residuals,

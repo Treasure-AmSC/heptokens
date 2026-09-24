@@ -29,6 +29,7 @@ class MapDataset(Dataset):
         num_csts: int | None = None,
         max_jet_pt: float | None = None,
         max_cst_pt: float | None = None,
+        position_features: list | None = None,
     ) -> None:
         super().__init__()
         if jet_features is None:
@@ -63,6 +64,11 @@ class MapDataset(Dataset):
             # Fill constituent features
             for i, key in enumerate(cst_features):
                 self.data_dict["csts"][:, :, i] = tracks_slice[key]
+            # Positions kept out of csts (positions-out tokenization)
+            if position_features is not None:
+                self.data_dict["positions"] = np.stack(
+                    [tracks_slice[key] for key in position_features], axis=-1
+                ).astype(np.float32)
             # Load validity mask
             self.data_dict["mask"] = tracks_slice["valid"]
 

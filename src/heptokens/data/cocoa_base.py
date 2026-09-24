@@ -93,3 +93,22 @@ def pad_jagged_to_fixed(
             csts[i, :n, f_idx] = arrays[feat][i][:n]
 
     return csts, mask
+
+
+def eta_phi_to_eta_cossin(pos: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Padded [..., 2] (eta, phi) -> [..., 3] (eta, cos phi, sin phi), zero at padded entries."""
+    out = np.stack([pos[..., 0], np.cos(pos[..., 1]), np.sin(pos[..., 1])], axis=-1)
+    out[~mask] = 0.0
+    return out
+
+
+def check_position_features(position_features: list[str] | None) -> list[str]:
+    """Positions-out split supports exactly [<x>_eta, <x>_phi]; returns [] when disabled."""
+    if position_features is None:
+        return []
+    position_features = list(position_features)
+    if len(position_features) != 2 or not (
+        position_features[0].endswith("_eta") and position_features[1].endswith("_phi")
+    ):
+        raise ValueError(f"position_features must be [<x>_eta, <x>_phi], got {position_features}")
+    return position_features

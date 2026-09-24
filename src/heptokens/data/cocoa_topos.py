@@ -14,6 +14,8 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset
 from heptokens.data.cocoa_base import (
     EVENTNUMBER_BRANCH,
     TOPO_FEATURES,
+    check_position_features,
+    eta_phi_to_eta_cossin,
     load_root_arrays,
     pad_jagged_to_fixed,
     root_files_from_dir,
@@ -24,7 +26,11 @@ log = logging.getLogger(__name__)
 
 
 class COCOATopoDataset(Dataset):
-    """In-memory dataset that loads COCOA topo clusters from ROOT files."""
+    """In-memory dataset that loads COCOA topo clusters from ROOT files.
+
+    With ``position_features`` ([eta, phi] branches), those are returned separately as
+    ``positions`` = (eta, cos phi, sin phi) and not in ``csts``.
+    """
 
     def __init__(
         self,
@@ -32,16 +38,19 @@ class COCOATopoDataset(Dataset):
         features: list[str] | None = None,
         max_csts: int = 50,
         num_events: int | None = None,
+        position_features: list[str] | None = None,
     ) -> None:
         super().__init__()
         if features is None:
             features = TOPO_FEATURES
         self.features = features
         self.max_csts = max_csts
+        pos_branches = check_position_features(position_features)
 
         csts_parts = []
         mask_parts = []
         event_parts = []
+        pos_parts = []
         loaded = 0
 
         for fpath in root_files:
@@ -49,8 +58,13 @@ class COCOATopoDataset(Dataset):
             if remaining is not None and remaining <= 0:
                 break
 
-            arrays = load_root_arrays(fpath, features + [EVENTNUMBER_BRANCH], max_entries=remaining)
-            csts, mask = pad_jagged_to_fixed(arrays, features, max_csts)
+            arrays = load_root_arrays(
+                fpath, features + pos_branches + [EVENTNUMBER_BRANCH], max_entries=remaining
+            )
+            csts, mask = pad_jagged_to_fixed(arrays, features + pos_branches, max_csts)
+            if pos_branches:
+                pos_parts.append(eta_phi_to_eta_cossin(csts[..., len(features) :], mask))
+                csts = csts[..., : len(features)]
             csts_parts.append(csts)
             mask_parts.append(mask)
             event_parts.append(np.asarray(arrays[EVENTNUMBER_BRANCH], dtype=np.int64))
@@ -59,11 +73,14 @@ class COCOATopoDataset(Dataset):
         self.csts = np.concatenate(csts_parts, axis=0)
         self.mask = np.concatenate(mask_parts, axis=0)
         self.event_numbers = np.concatenate(event_parts, axis=0)
+        self.positions = np.concatenate(pos_parts, axis=0) if pos_branches else None
 
         if num_events is not None and len(self.csts) > num_events:
             self.csts = self.csts[:num_events]
             self.mask = self.mask[:num_events]
             self.event_numbers = self.event_numbers[:num_events]
+            if self.positions is not None:
+                self.positions = self.positions[:num_events]
 
         log.info(
             f"Loaded {len(self.csts):,} events from {len(root_files)} files "
@@ -74,12 +91,15 @@ class COCOATopoDataset(Dataset):
         return len(self.csts)
 
     def __getitem__(self, idx: int) -> dict:
-        return {
+        item = {
             "csts": self.csts[idx],
             "mask": self.mask[idx],
             "eventNumber": self.event_numbers[idx],
             "labels": 0,
         }
+        if self.positions is not None:
+            item["positions"] = self.positions[idx]
+        return item
 
 
 class COCOATopoModule(LightningDataModule):
@@ -99,6 +119,7 @@ class COCOATopoModule(LightningDataModule):
         pin_memory: bool = True,
         persistent_workers: bool | None = None,
         transforms: dict | None = None,
+        position_features: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -115,10 +136,13 @@ class COCOATopoModule(LightningDataModule):
             num_workers > 0 if persistent_workers is None else persistent_workers
         )
         self.transforms = transforms
+        self.position_features = position_features
 
     def _make_dataset(self, split_dir: str):
         files = root_files_from_dir(self.data_dir / split_dir)
-        return COCOATopoDataset(files, self.features, self.max_csts, self.num_events)
+        return COCOATopoDataset(
+            files, self.features, self.max_csts, self.num_events, self.position_features
+        )
 
     def setup(self, stage: str = "fit") -> None:
         if stage in {"fit", "train"}:

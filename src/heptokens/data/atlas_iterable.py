@@ -29,6 +29,7 @@ def _iter_chunk_samples(
     max_cst_pt,
     pt_idx,
     cst_pt_idx,
+    position_features=None,
 ):
     """Read one chunk of (sorted) indices from open HDF5 datasets and yield samples.
 
@@ -73,6 +74,11 @@ def _iter_chunk_samples(
     # Load validity mask
     mask_chunk = tracks_chunk["valid"]
 
+    if position_features is not None:
+        positions_chunk = np.stack(
+            [tracks_chunk[key] for key in position_features], axis=-1
+        ).astype(np.float32)
+
     # Apply jet pT cut
     keep = np.ones(n, dtype=bool)
     if max_jet_pt is not None and pt_idx is not None:
@@ -87,13 +93,16 @@ def _iter_chunk_samples(
     for i in range(n):
         if not keep[i]:
             continue
-        yield {
+        sample = {
             "jets": jets_chunk[i],
             "csts": csts_chunk[i],
             "mask": mask_chunk[i],
             "labels": labels_mapped[i],
             "eventNumber": event_numbers_chunk[i],
         }
+        if position_features is not None:
+            sample["positions"] = positions_chunk[i]
+        yield sample
 
 
 class IterMapDataset(IterableDataset):
@@ -397,6 +406,7 @@ class IndexedIterMapDataset(IterableDataset):
         max_cst_pt: float | None = None,
         chunk_size: int = 1000,
         label_map: dict | None = None,
+        position_features: list | None = None,
     ) -> None:
         super().__init__()
         if jet_features is None:
@@ -408,6 +418,7 @@ class IndexedIterMapDataset(IterableDataset):
         self.indices = indices
         self.jet_features = jet_features
         self.cst_features = cst_features
+        self.position_features = position_features
         self.label_key = label_key
         self.chunk_size = chunk_size
         self.max_jet_pt = max_jet_pt
@@ -490,6 +501,7 @@ class IndexedIterMapDataset(IterableDataset):
                     max_cst_pt=self.max_cst_pt,
                     pt_idx=self.pt_idx,
                     cst_pt_idx=self.cst_pt_idx,
+                    position_features=self.position_features,
                 )
 
     def __len__(self) -> int:
