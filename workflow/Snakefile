@@ -2288,6 +2288,9 @@ JETSET_LARGE_ARCH = " ".join(
     for side in ("encoder", "decoder") for k, v in transformer_sizes["large"].items()
 )
 
+# Inner ampere sbatch for the design rules; identical to SLURM unless --config exclude_nodes=... is given.
+DESIGN_SLURM = SLURM + (f" --exclude={config['exclude_nodes']}" if config.get("exclude_nodes") else "")
+
 def _design(group, project, cb, cd, nq, cst_fn, extra="", test_extra="", recon_idx=""):
     return dict(group=group, project=project, cb=cb, cd=cd, nq=nq, cst_fn=cst_fn, extra=extra,
                 test_extra=test_extra, recon_idx=recon_idx)
@@ -2426,7 +2429,7 @@ rule train_design_jetset:
         num_quantizers = _design_param(design_jetset, "nq"),
         cst_fn = _design_param(design_jetset, "cst_fn"),
         extra = _design_param(design_jetset, "extra"),
-        slurm = SLURM,
+        slurm = DESIGN_SLURM,
     wildcard_constraints:
         design_project = "|".join(sorted({c["project"] for c in design_jetset.values()})),
         design_name = "|".join(design_jetset),
@@ -2476,7 +2479,7 @@ rule test_design_jetset:
         num_quantizers = _design_param(design_jetset, "nq"),
         cst_fn = _design_param(design_jetset, "cst_fn"),
         test_extra = _design_param(design_jetset, "test_extra"),
-        slurm = SLURM,
+        slurm = DESIGN_SLURM,
     wildcard_constraints:
         design_project = "|".join(sorted({c["project"] for c in design_jetset.values()})),
         design_name = "|".join(design_jetset),
@@ -2527,7 +2530,7 @@ rule train_design_tracks:
         num_quantizers = _design_param(design_tracks, "nq"),
         cst_fn = _design_param(design_tracks, "cst_fn"),
         extra = _design_param(design_tracks, "extra"),
-        slurm = SLURM,
+        slurm = DESIGN_SLURM,
     wildcard_constraints:
         design_project = "|".join(sorted({c["project"] for c in design_tracks.values()})),
         design_name = "|".join(design_tracks),
@@ -2585,7 +2588,7 @@ rule test_design_tracks:
         num_quantizers = _design_param(design_tracks, "nq"),
         cst_fn = _design_param(design_tracks, "cst_fn"),
         test_extra = _design_param(design_tracks, "test_extra"),
-        slurm = SLURM,
+        slurm = DESIGN_SLURM,
     wildcard_constraints:
         design_project = "|".join(sorted({c["project"] for c in design_tracks.values()})),
         design_name = "|".join(design_tracks),
@@ -2637,7 +2640,7 @@ rule train_design_topos:
         num_quantizers = _design_param(design_topos, "nq"),
         cst_fn = _design_param(design_topos, "cst_fn"),
         extra = _design_param(design_topos, "extra"),
-        slurm = SLURM,
+        slurm = DESIGN_SLURM,
     wildcard_constraints:
         design_project = "|".join(sorted({c["project"] for c in design_topos.values()})),
         design_name = "|".join(design_topos),
@@ -2696,7 +2699,7 @@ rule test_design_topos:
         cst_fn = _design_param(design_topos, "cst_fn"),
         test_extra = _design_param(design_topos, "test_extra"),
         recon_idx = _design_param(design_topos, "recon_idx"),
-        slurm = SLURM,
+        slurm = DESIGN_SLURM,
     wildcard_constraints:
         design_project = "|".join(sorted({c["project"] for c in design_topos.values()})),
         design_name = "|".join(design_topos),
