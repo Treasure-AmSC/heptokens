@@ -142,12 +142,43 @@ def test_monitor_guards():
     print(f"  identity 'reconstruction' through monitor: jet pT IQR/median = {(q[2] - q[0]) / q[1]:.3e} (binning only)")
 
 
-def test_a_vs_b():
-    """A vs B: positions, bins and decoded centres bitwise; jet pT from the same reco constituents."""
+def _b_modules():
     sys.path.insert(0, str(B_SRC))
     from heptokens_cocoa.callbacks.topo_recon import TopoReconstructionMonitor
     from heptokens_cocoa.data.cocoa_topos import COCOATopoDataset as BTopo
     from heptokens_cocoa.models.pos_tokenizer import PositionTokenizer as BTok
+
+    return TopoReconstructionMonitor, BTopo, BTok
+
+
+def _real_topo_reco():
+    """Truth and model-reconstructed topo constituents (physical units, A feature order TOPOS)
+    from the trained A positions-in run cocoa_topos_cb4096_cd8_nq4_lr0.001."""
+    from heptokens.data.collation import inverse_preprocess_batch, preprocess_batch
+    from heptokens.models.vq_vae import LitVqVae
+
+    run = Path("/sdf/data/atlas/u/jkrupa/heptokens/results/cocoa_scan/topos/cocoa_topos_cb4096_cd8_nq4_lr0.001")
+    scaler = joblib.load(RES / "cocoa_topo_log_standard.joblib")
+    ds = COCOATopoDataset(FILES, TOPOS, num_events=N_EVENTS)
+    batch = preprocess_batch({"csts": T.from_numpy(ds.csts.copy()), "mask": T.from_numpy(ds.mask)}, scaler)
+    model = LitVqVae.load_from_checkpoint(run / "checkpoints/best.ckpt", map_location="cpu").eval()
+    with T.no_grad():
+        recon = model.decode(model.encode(batch)[0], batch)
+    reco = inverse_preprocess_batch({"csts": recon, "mask": batch["mask"]}, scaler)["csts"].numpy()
+    return ds.csts, reco, ds.mask
+
+
+def _cmp(name, a, b):
+    rel = np.abs(a - b) / np.maximum(np.abs(b), 1e-12)
+    print(f"  {name}: bitwise equal = {np.array_equal(a, b, equal_nan=True)}, "
+          f"max|diff| = {np.nanmax(np.abs(a - b)):.3e}, max rel diff = {np.nanmax(rel):.3e} ({a.size} jets)")
+    assert np.allclose(a, b, rtol=1e-6, atol=0, equal_nan=True)
+
+
+def test_a_vs_b():
+    """A vs B positions-out: positions, bins and decoded centres bitwise; jet pT from the same
+    real model-reconstructed constituents."""
+    TopoReconstructionMonitor, BTopo, BTok = _b_modules()
 
     content = _drop(TOPOS, ["topo_eta", "topo_phi"])
     a = COCOATopoDataset(FILES, content, num_events=N_EVENTS, position_features=["topo_eta", "topo_phi"])
@@ -157,7 +188,6 @@ def test_a_vs_b():
           f"max|diff| = {np.abs(a.positions - b.positions).max():.1e}")
 
     pos = T.from_numpy(b.positions)
-    np.savez("/tmp/design_cfg/ab_topo_batch.npz", positions=b.positions, csts=b.csts, mask=b.mask)
     ta, tb = PositionTokenizer(), BTok(ranges=[[-3.0, 3.0], [-1.0, 1.0], [-1.0, 1.0]], n_bins=1024)
     ia, ib = ta(pos), tb(pos)
     da, db = ta.decode(ia), tb.decode(ib)
@@ -165,21 +195,49 @@ def test_a_vs_b():
           f"decoded bitwise equal = {T.equal(da, db)} ({ia.numel()} values)")
     assert T.equal(ia, ib) and T.equal(da, db)
 
-    rng = np.random.default_rng(0)
-    reco = b.csts.copy()
-    reco[..., 0] *= rng.lognormal(0.0, 0.05, size=reco[..., 0].shape).astype(np.float32)
-    np.savez("/tmp/design_cfg/ab_topo_reco.npz", reco=reco)
-    reco_t, mask_t = T.from_numpy(reco), T.from_numpy(b.mask)
-    eta, cosp, sinp = (db[..., i].numpy() for i in range(3))
+    truth_full, reco_full, mask = _real_topo_reco()
+    assert np.array_equal(mask, b.mask)
+    truth_t, reco_t = T.from_numpy(b.csts), T.from_numpy(np.ascontiguousarray(reco_full[..., 2:]))
+    mask_t = T.from_numpy(b.mask)
     jb = TopoReconstructionMonitor(cst_fn=None, energy_idx=0, content_features=content, pos_tokenizer=tb)
     ja = ReconstructionMonitor(cst_fn=None, energy_idx=0, pos_tokenizer=ta)
-    pb = jb._compute_jet_from_clusters(reco_t, eta, cosp, sinp, mask_t)["pt"]
-    dir_a = ja._directions_from_positions(da)
-    pa = ja._compute_jet_from_positions(reco_t, *dir_a, mask_t)["pt"]
-    rel = np.abs(pa - pb) / np.maximum(np.abs(pb), 1e-12)
-    print(f"  jet pT A vs B on same reco constituents: bitwise equal = {np.array_equal(pa, pb)}, "
-          f"max|diff| = {np.abs(pa - pb).max():.3e} GeV, max rel diff = {rel.max():.3e}")
-    assert np.allclose(pa, pb, rtol=1e-6, atol=0)
+    (bt, br) = jb._truth_and_reco_positions(None, None, pos)
+    pb_t = jb._compute_jet_from_clusters(truth_t, *bt, mask_t)["pt"]
+    pb_r = jb._compute_jet_from_clusters(reco_t, *br, mask_t)["pt"]
+    pa_t = ja._compute_jet_from_positions(truth_t, *ja._directions_from_positions(pos), mask_t)["pt"]
+    pa_r = ja._compute_jet_from_positions(reco_t, *ja._directions_from_positions(da), mask_t)["pt"]
+    _cmp("positions-out truth jet pT A vs B", pa_t, pb_t)
+    _cmp("positions-out reco jet pT A vs B (real model reco)", pa_r, pb_r)
+    _cmp("positions-out pt_ratio A vs B", pa_r / pa_t, pb_r / pb_t)
+
+
+def test_a_vs_b_positions_in():
+    """A vs B positions-in: dataset csts bitwise (after column reorder); jet pT from the same
+    real model-reconstructed constituents with eta/phi taken from csts."""
+    TopoReconstructionMonitor, BTopo, _ = _b_modules()
+
+    b_order = _drop(TOPOS, ["topo_eta", "topo_phi"]) + ["topo_eta", "topo_phi"]  # B positions_in order
+    perm = [TOPOS.index(f) for f in b_order]
+    a = COCOATopoDataset(FILES, TOPOS, num_events=N_EVENTS)
+    b = BTopo(FILES, content_features=b_order, num_events=N_EVENTS)
+    assert np.array_equal(a.mask, b.mask)
+    same = np.array_equal(a.csts[..., perm], b.csts)
+    print(f"  positions-in csts A (reordered) vs B: bitwise equal = {same}, "
+          f"max|diff| = {np.abs(a.csts[..., perm] - b.csts).max():.1e}")
+    assert same
+
+    truth_a, reco_a, mask = _real_topo_reco()
+    mask_t = T.from_numpy(mask)
+    ja = ReconstructionMonitor(cst_fn=None, deta_idx=0, dphi_idx=1, energy_idx=2)
+    jb = TopoReconstructionMonitor(cst_fn=None, energy_idx=0, content_features=b_order)
+    res = {}
+    for label, x in (("truth", truth_a), ("reco", reco_a)):
+        xa = T.from_numpy(np.ascontiguousarray(x))
+        xb = T.from_numpy(np.ascontiguousarray(x[..., perm]))
+        res[label] = (ja._compute_jet_from_constituents(xa, mask_t)["pt"],
+                      jb._compute_jet_from_clusters(xb, *jb._positions_from_csts(xb), mask_t)["pt"])
+        _cmp(f"positions-in {label} jet pT A vs B" + (" (real model reco)" if label == "reco" else ""), *res[label])
+    _cmp("positions-in pt_ratio A vs B", res["reco"][0] / res["truth"][0], res["reco"][1] / res["truth"][1])
 
 
 if __name__ == "__main__":
