@@ -41,6 +41,11 @@ def main(cfg: DictConfig) -> None:
     log.info(f"Setting matrix precision to: {cfg.precision}")
     T.set_float32_matmul_precision(cfg.precision)
 
+    if not cfg.get("mha_fastpath", True):
+        # CUDA fast path of nn.TransformerEncoderLayer uses tanh-approximate GELU in eval mode
+        log.info("Disabling the torch MHA / TransformerEncoder fast path")
+        T.backends.mha.set_fastpath_enabled(False)
+
     log.info("Instantiating the data module")
     datamodule = hydra.utils.instantiate(cfg.datamodule)
 
@@ -87,7 +92,7 @@ def main(cfg: DictConfig) -> None:
         datamodule.setup(stage="test")
         trainer.validate(model, dataloaders=datamodule.test_dataloader(), ckpt_path=cfg.ckpt_path)
         # Write marker in parent dir (training run dir, not test subdir)
-        save_declaration(filename=str(Path("..") / "TEST_SUCCESS.txt"))
+        save_declaration(filename=str(Path("..") / cfg.get("test_marker", "TEST_SUCCESS.txt")))
     else:
         log.info("Starting training!")
         # When warm-starting from a checkpoint's weights (weight_ckpt_path is set), the

@@ -2371,6 +2371,10 @@ for cb, cd in product([256, 1024, 4096], [4, 8, 12]):
         recon_idx="+callbacks.reconstruction_monitor.energy_idx=0",
     )
 
+# These tracks Q=3 references were trained with max_epochs=200 / patience=20; retrain at the scan recipe (50 / 15).
+for cb, cd in [(64, 4), (256, 2), (256, 4), (1024, 2), (1024, 4)]:
+    design_tracks[f"cocoa_tracks_cb{cb}_cd{cd}_nq3_lr0.001_e50"] = _design("recipe", "tracks_e50", cb, cd, 3, COCOA_CST_FN)
+
 def _design_targets(lookup, root, marker, groups):
     return [str(root / c["project"] / name / marker) for name, c in lookup.items() if c["group"] in groups]
 
@@ -2415,6 +2419,14 @@ rule all_design_batch2_test:
         _design_targets(design_jetset, scan_output_dir, "TEST_SUCCESS.txt", ["posout", "seed"]),
         _design_targets(design_tracks, cocoa_output_dir, "TEST_SUCCESS.txt", ["posout", "seed"]),
         _design_targets(design_topos, cocoa_output_dir, "TEST_SUCCESS.txt", ["posout", "seed"]),
+
+rule all_design_recipe:
+    input:
+        _design_targets(design_tracks, cocoa_output_dir, "SUCCESS.txt", ["recipe"]),
+
+rule all_design_recipe_test:
+    input:
+        _design_targets(design_tracks, cocoa_output_dir, "TEST_SUCCESS.txt", ["recipe"]),
 
 rule train_design_jetset:
     input:
@@ -2737,4 +2749,212 @@ rule test_design_topos:
                 trainer.enable_progress_bar=false \
                 datamodule.transforms.preprocess.cst_fn.filename={params.cst_fn} \
                 {params.test_extra}"
+        """
+
+# ── Re-tests with the torch MHA fast path off and fp32 matmuls (every run of the design figure and Fig. 1) ──
+# On CUDA the eval fast path of nn.TransformerEncoderLayer uses tanh-approximate GELU; training used exact GELU.
+# Same test sample and settings as the stored tests; outputs go to {run}/test_nofastpath/ with their own
+# marker, so the stored test/ results and TEST_SUCCESS.txt are never touched.
+import re
+
+NOFP_SUBDIR = "test_nofastpath"
+NOFP_MARKER = "TEST_NOFASTPATH_SUCCESS.txt"
+NOFP_OVERRIDES = f"precision=highest +mha_fastpath=false +test_marker={NOFP_MARKER}"
+
+def _nofp_lookup(project, grid, cst_fn, name, design, recon_idx="", ckpt_overrides=None):
+    stored = {name(cb, cd, nq): _design("stored", project, cb, cd, nq, cst_fn, recon_idx=recon_idx)
+              for cb, cd, nq in product(*grid)}
+    assert not set(stored) & set(design), set(stored) & set(design)
+    for n, ckpt in (ckpt_overrides or {}).items():
+        stored[n]["ckpt"] = ckpt
+    return {**stored, **design}
+
+# Stored runs whose checkpoints sit in a nested results/ dir (the path their stored test used).
+_JETSET_NESTED_CKPT = {
+    n: str(scan_output_dir / "vqvae_scan" / n / "results/vqvae_scan/vqvae_scan" / n / "checkpoints/best.ckpt")
+    for n in (_jetset_name(32768, 2, 4), _jetset_name(32768, 4, 4))
+}
+
+nofp_jetset = _nofp_lookup("vqvae_scan", ([1024, 8192, 16384, 32768], [2, 4, 8, 16], [3, 4]), JETSET_CST_FN,
+                           _jetset_name, design_jetset, ckpt_overrides=_JETSET_NESTED_CKPT)
+nofp_tracks = _nofp_lookup("tracks", ([64, 256, 1024, 4096], [2, 4, 8], [2, 3, 4]), COCOA_CST_FN,
+                           lambda cb, cd, nq: f"cocoa_tracks_cb{cb}_cd{cd}_nq{nq}_lr0.001", design_tracks)
+nofp_topos = _nofp_lookup("topos", ([64, 256, 1024, 4096], [2, 4, 8, 12], [2, 3, 4]), COCOA_TOPO_CST_FN,
+                          lambda cb, cd, nq: f"cocoa_topos_cb{cb}_cd{cd}_nq{nq}_lr0.001", design_topos,
+                          recon_idx=TOPO_POSIN_RECON_IDX)
+
+def _nofp_param(lookup, key):
+    return lambda wc: lookup[wc.nofp_name][key]
+
+def _nofp_ckpt(lookup, root):
+    return lambda wc: ancient(lookup[wc.nofp_name].get(
+        "ckpt", str(root / wc.nofp_project / wc.nofp_name / "checkpoints/best.ckpt")))
+
+def _nofp_constraints(lookup):
+    return dict(
+        nofp_project="|".join(sorted({c["project"] for c in lookup.values()})),
+        nofp_name="|".join(re.escape(n) for n in lookup),
+    )
+
+def _nofp_targets(lookup, root):
+    return [str(root / c["project"] / name / NOFP_MARKER) for name, c in lookup.items()]
+
+rule all_nofp_test:
+    input:
+        _nofp_targets(nofp_jetset, scan_output_dir),
+        _nofp_targets(nofp_tracks, cocoa_output_dir),
+        _nofp_targets(nofp_topos, cocoa_output_dir),
+
+rule test_nofp_jetset:
+    input:
+        ckpt = _nofp_ckpt(nofp_jetset, scan_output_dir),
+    output:
+        scan_output_dir / ("{nofp_project}/{nofp_name}/" + NOFP_MARKER),
+    params:
+        output_dir = scan_output_dir,
+        codebook_size = _nofp_param(nofp_jetset, "cb"),
+        codebook_dim = _nofp_param(nofp_jetset, "cd"),
+        num_quantizers = _nofp_param(nofp_jetset, "nq"),
+        cst_fn = _nofp_param(nofp_jetset, "cst_fn"),
+        test_extra = _nofp_param(nofp_jetset, "test_extra"),
+        slurm = DESIGN_SLURM,
+    wildcard_constraints:
+        **_nofp_constraints(nofp_jetset),
+    shell:
+        """
+        {params.slurm} -J nofp_{wildcards.nofp_name} \
+            -o {params.output_dir}/{wildcards.nofp_project}/{wildcards.nofp_name}/slurm_test_nofp_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={params.output_dir} \
+                project_name={wildcards.nofp_project} \
+                network_name={wildcards.nofp_name}/{NOFP_SUBDIR} \
+                model=transformer_vqvae \
+                datamodule=atlas_iterable \
+                datamodule.data_path=/sdf/scratch/users/j/jkrupa/data/atlas/mc-flavtag-ttbar-small.h5 \
+                datamodule.train_frac=0.001 \
+                datamodule.num_workers=0 \
+                datamodule.val_frac=0.001 \
+                datamodule.test_frac=0.998 \
+                datamodule.num_workers=2 \
+                datamodule.num_csts=40 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                {JETSET_LARGE_ARCH} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate=0.0003 \
+                +model.commitment_weight=1.0 \
+                callbacks=encode \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.jet_fn.filename='{JETSET_JET_FN}' \
+                datamodule.transforms.preprocess.cst_fn.filename='{params.cst_fn}' \
+                {params.test_extra} \
+                {NOFP_OVERRIDES}"
+        """
+
+rule test_nofp_tracks:
+    input:
+        ckpt = _nofp_ckpt(nofp_tracks, cocoa_output_dir),
+    output:
+        cocoa_output_dir / ("{nofp_project}/{nofp_name}/" + NOFP_MARKER),
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = _nofp_param(nofp_tracks, "cb"),
+        codebook_dim = _nofp_param(nofp_tracks, "cd"),
+        num_quantizers = _nofp_param(nofp_tracks, "nq"),
+        cst_fn = _nofp_param(nofp_tracks, "cst_fn"),
+        test_extra = _nofp_param(nofp_tracks, "test_extra"),
+        slurm = DESIGN_SLURM,
+    wildcard_constraints:
+        **_nofp_constraints(nofp_tracks),
+    shell:
+        """
+        {params.slurm} -J nofp_{wildcards.nofp_name} \
+            -o {params.output_dir}/{wildcards.nofp_project}/{wildcards.nofp_name}/slurm_test_nofp_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={COCOA_TEST_OUTPUT_DIR} \
+                project_name={wildcards.nofp_project} \
+                network_name={wildcards.nofp_name}/{NOFP_SUBDIR} \
+                model=transformer_vqvae \
+                datamodule=cocoa_tracks \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=100000 \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate=0.001 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=encode_cocoa \
+                callbacks.reconstruction_monitor.compute_jet_metrics=true \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.cst_fn.filename={params.cst_fn} \
+                {params.test_extra} \
+                {NOFP_OVERRIDES}"
+        """
+
+rule test_nofp_topos:
+    input:
+        ckpt = _nofp_ckpt(nofp_topos, cocoa_output_dir),
+    output:
+        cocoa_output_dir / ("{nofp_project}/{nofp_name}/" + NOFP_MARKER),
+    params:
+        output_dir = cocoa_output_dir,
+        codebook_size = _nofp_param(nofp_topos, "cb"),
+        codebook_dim = _nofp_param(nofp_topos, "cd"),
+        num_quantizers = _nofp_param(nofp_topos, "nq"),
+        cst_fn = _nofp_param(nofp_topos, "cst_fn"),
+        test_extra = _nofp_param(nofp_topos, "test_extra"),
+        recon_idx = _nofp_param(nofp_topos, "recon_idx"),
+        slurm = DESIGN_SLURM,
+    wildcard_constraints:
+        **_nofp_constraints(nofp_topos),
+    shell:
+        """
+        {params.slurm} -J nofp_{wildcards.nofp_name} \
+            -o {params.output_dir}/{wildcards.nofp_project}/{wildcards.nofp_name}/slurm_test_nofp_%j.log \
+            --wrap="pixi run python scripts/train.py \
+                output_dir={COCOA_TEST_OUTPUT_DIR} \
+                project_name={wildcards.nofp_project} \
+                network_name={wildcards.nofp_name}/{NOFP_SUBDIR} \
+                model=transformer_vqvae \
+                datamodule=cocoa_topos \
+                datamodule.data_dir={COCOA_DATA_DIR} \
+                datamodule.num_events=100000 \
+                model.encoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.encoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.encoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.encoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.decoder.model.d_model={cocoa_encoder_size[d_model]} \
+                model.decoder.model.n_heads={cocoa_encoder_size[n_heads]} \
+                model.decoder.model.num_layers={cocoa_encoder_size[num_layers]} \
+                model.decoder.model.dim_feedforward={cocoa_encoder_size[dim_feedforward]} \
+                model.codebook_size={params.codebook_size} \
+                model.codebook_dim={params.codebook_dim} \
+                model.num_quantizers={params.num_quantizers} \
+                model.learning_rate=0.001 \
+                ckpt_path={input.ckpt} \
+                test_only=true \
+                callbacks=encode_cocoa \
+                callbacks.reconstruction_monitor.compute_jet_metrics=true \
+                {params.recon_idx} \
+                +callbacks.reconstruction_monitor.max_batches=100 \
+                trainer.limit_val_batches=100 \
+                trainer.enable_progress_bar=false \
+                datamodule.transforms.preprocess.cst_fn.filename={params.cst_fn} \
+                {params.test_extra} \
+                {NOFP_OVERRIDES}"
         """
