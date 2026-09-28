@@ -2279,6 +2279,13 @@ rule eval_pflow_cont:
 # with cst_fn and free-form `extra` / `test_extra` override slots (empty unless needed).
 import yaml
 
+# These shells only run `sbatch --wait` for the ampere job, so run them on the driver host
+# instead of as idle turing wrapper jobs.
+localrules: posout_scaler, all_design_rules, all_design_rules_test, all_design_batch2, all_design_batch2_test
+localrules: all_design_recipe, all_design_recipe_test, all_nofp_test
+localrules: train_design_jetset, test_design_jetset, train_design_tracks, test_design_tracks
+localrules: train_design_topos, test_design_topos, test_nofp_jetset, test_nofp_tracks, test_nofp_topos
+
 JETSET_CST_FN = f"{WORKSPACE}/resources/cst_quantiles.joblib"
 JETSET_JET_FN = f"{WORKSPACE}/resources/jet_quantiles.joblib"
 # Relative, as the reference COCOA tests ran (their test_metrics nest under test/results/...).
