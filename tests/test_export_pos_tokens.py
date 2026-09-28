@@ -81,9 +81,7 @@ def test_pos_tokenizer_adds_pos_tokens_without_changing_indices(tmp_path: Path):
     # Baseline run with no tokenizer, for comparison.
     baseline_dir = tmp_path / "baseline"
     baseline_dir.mkdir()
-    baseline_writer = MemmapPredictionWriter(
-        str(baseline_dir), TOTAL, NUM_ELEMENTS, NUM_QUANTIZERS
-    )
+    baseline_writer = MemmapPredictionWriter(str(baseline_dir), TOTAL, NUM_ELEMENTS, NUM_QUANTIZERS)
     baseline_writer.write_on_batch_end(None, None, prediction, None, batch, 0, 0)
     n_baseline = baseline_writer.finalize()
     baseline_indices = np.lib.format.open_memmap(str(baseline_writer.indices_path), mode="r")[

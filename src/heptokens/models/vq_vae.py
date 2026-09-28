@@ -63,9 +63,13 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
             input_dim = 3  # Default for now
 
         # Declare encoder
-        self.encoder = encoder(input_dim=input_dim, output_dim=codebook_dim, data_sample=data_sample)
+        self.encoder = encoder(
+            input_dim=input_dim, output_dim=codebook_dim, data_sample=data_sample
+        )
         # Declare decoder
-        self.decoder = decoder(input_dim=codebook_dim, output_dim=input_dim, data_sample=data_sample)
+        self.decoder = decoder(
+            input_dim=codebook_dim, output_dim=input_dim, data_sample=data_sample
+        )
 
         # Vector quantization
         self.vector_quantization = ResidualVQ(
