@@ -108,3 +108,32 @@ def test_alpha_positive_upweights_high_energy_pixel():
             assert torch.isclose(m["energy_mse_weighted"], m["energy_mse"])
         else:
             assert m["energy_mse_weighted"] > m["energy_mse"]
+
+
+def test_l1_energy_loss_is_mean_absolute_error():
+    """energy_loss_type='l1' uses mean |error| over occupied pixels, weighted or not."""
+    p = 0.3
+    energy_true = torch.tensor([[[100.0, 1.0, 1.0, 1.0]]]).pow(p)
+    targets = torch.cat([energy_true, torch.ones_like(energy_true)], dim=-1)
+    mask = torch.ones(1, 1, dtype=torch.bool)
+    energy_recon = energy_true.clone()
+    energy_recon[..., 0] -= 0.5
+    energy_recon[..., 1] += 0.1
+    fixed_recon = torch.cat([energy_recon, torch.full_like(energy_true, 10.0)], dim=-1)
+    batch = {"energy": targets, "mask": mask}
+
+    for alpha in (0.0, 0.7):
+        decoder = CellDecoder(
+            input_dim=5, output_dim=8, model=CoderModel, input_key="energy",
+            mask_key="mask", energy_loss_alpha=alpha, energy_power=p, energy_loss_type="l1",
+        )
+        decoder.forward = lambda _z, _b: fixed_recon
+        decoder.compute_loss(torch.zeros(1, 1, 5), batch)
+        m = decoder.last_metrics
+        assert torch.isclose(m["energy_l1"], torch.tensor(0.6 / 4))
+        if alpha == 0.0:
+            assert torch.isclose(m["energy_l1_weighted"], m["energy_l1"])
+        else:
+            w = torch.tensor([100.0, 1.0, 1.0, 1.0]).pow(alpha)
+            expected = (w * torch.tensor([0.5, 0.1, 0.0, 0.0])).sum() / w.sum()
+            assert torch.isclose(m["energy_l1_weighted"], expected, atol=1e-5)

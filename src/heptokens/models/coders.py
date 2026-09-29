@@ -195,7 +195,8 @@ class CellDecoder(Decoder):
 
     Loss:
       - Binary cross-entropy on the indicator for all pixels in non-empty patches
-      - MSE on energy for pixels where the indicator is 1 (occupied pixels only),
+      - MSE (or L1, ``energy_loss_type="l1"``) on energy for pixels where the
+        indicator is 1 (occupied pixels only),
         optionally weighted per pixel by ``w_i = E_i**energy_loss_alpha`` where
         ``E_i`` is the linear truth energy recovered from the compressed target
         (``E = y**(1/energy_power)``). ``energy_loss_alpha=0`` reproduces the
@@ -216,6 +217,8 @@ class CellDecoder(Decoder):
         energy_power: Preprocessing energy compression exponent p (targets are
             stored as ``E**p``); the inverse ``1/p`` recovers linear energy.
             Must match ``preprocess_hep4m_cells.py``'s ``ENERGY_POWER``.
+        energy_loss_type: Per-pixel energy loss, ``"mse"`` (default, original
+            loss) or ``"l1"``. The alpha weighting applies to either.
     """
 
     def __init__(
@@ -230,6 +233,7 @@ class CellDecoder(Decoder):
         energy_loss_alpha: float = 0.0,
         energy_sum_loss_weight: float = 0.0,
         energy_power: float = 0.3,
+        energy_loss_type: str = "mse",
     ):
         super().__init__(
             input_dim=input_dim,
@@ -243,6 +247,9 @@ class CellDecoder(Decoder):
         self.energy_loss_alpha = float(energy_loss_alpha)
         self.energy_sum_loss_weight = float(energy_sum_loss_weight)
         self.energy_power = float(energy_power)
+        if energy_loss_type not in ("mse", "l1"):
+            raise ValueError(f"energy_loss_type must be 'mse' or 'l1', got {energy_loss_type!r}")
+        self.energy_loss_type = energy_loss_type
         self.last_metrics: Dict[str, float] = {}
 
     def compute_loss(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -268,9 +275,12 @@ class CellDecoder(Decoder):
         if pixel_mask.any():
             energy_recon_sel = energy_recon[pixel_mask]
             energy_true_sel = energy_true[pixel_mask]
-            # Unweighted MSE — identical to the original loss (also the
-            # alpha=0 return value, so alpha=0 stays bitwise-identical).
-            loss_energy_unweighted = nn.functional.mse_loss(energy_recon_sel, energy_true_sel)
+            # Unweighted loss — for "mse" identical to the original loss (also
+            # the alpha=0 return value, so alpha=0 stays bitwise-identical).
+            if self.energy_loss_type == "l1":
+                loss_energy_unweighted = nn.functional.l1_loss(energy_recon_sel, energy_true_sel)
+            else:
+                loss_energy_unweighted = nn.functional.mse_loss(energy_recon_sel, energy_true_sel)
             if self.energy_loss_alpha != 0.0:
                 # Targets are raw E**p — CellDataset applies no standardization
                 # (unlike tracks/topos), so E = y**(1/p) exactly and y>=0.
@@ -279,11 +289,12 @@ class CellDecoder(Decoder):
                 energy_recon_f = energy_recon_sel.float()
                 energy_true_lin = energy_true_f.clamp(min=0.0).pow(1.0 / self.energy_power)
                 weight = energy_true_lin.pow(self.energy_loss_alpha)
-                sq = (energy_recon_f - energy_true_f) ** 2
+                diff = energy_recon_f - energy_true_f
+                per_pixel = diff.abs() if self.energy_loss_type == "l1" else diff**2
                 # Normalize by sum(w) (not pixel count) so the loss scale is
                 # comparable across alpha.
                 weight_sum = weight.sum().clamp_min(torch.finfo(weight.dtype).eps)
-                loss_energy = (weight * sq).sum() / weight_sum
+                loss_energy = (weight * per_pixel).sum() / weight_sum
             else:
                 loss_energy = loss_energy_unweighted
         else:
@@ -301,8 +312,8 @@ class CellDecoder(Decoder):
             loss_energy_sum = recon.sum() * 0.0
 
         self.last_metrics = {
-            "energy_mse": loss_energy_unweighted.detach(),
-            "energy_mse_weighted": loss_energy.detach(),
+            f"energy_{self.energy_loss_type}": loss_energy_unweighted.detach(),
+            f"energy_{self.energy_loss_type}_weighted": loss_energy.detach(),
             "occupancy_bce": loss_ind.detach(),
             "energy_sum_mse": loss_energy_sum.detach(),
             "energy_loss_alpha": self.energy_loss_alpha,
