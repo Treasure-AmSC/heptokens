@@ -2,7 +2,7 @@
 name = "heptokens"
 version = "0.1.1"
 authors = [{ name = "Samuel Klein"}, { name = "Jeffrey Krupa" }, {name = "Michael Kagan"}]
-license = "MIT"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 readme = "README.md"
 requires-python = ">=3.11"
