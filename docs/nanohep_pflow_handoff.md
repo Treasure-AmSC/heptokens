@@ -17,7 +17,7 @@ export WORK=<scratch dir for this study, e.g. $SCRATCH/nanohep_pflow>
 export RAW_TRAIN=<dir with the ~89M-event training ROOT files>
 export RAW_VAL=<dir with validation ROOT files (disjoint from train)>
 export RAW_TEST=<dir with test ROOT files (disjoint from train and val)>
-export TOKENIZERS=<dir with the tokenizer runs copied from S3DF, layout in section 1>
+export TOKENIZERS=/global/cfs/cdirs/m5386/data/COCOA/tokenizers   # copied from S3DF, layout in section 1
 export HEPTOKENS=$WORK/heptokens          # clone, section 2
 export ANY2ANY=$WORK/hep-any2any          # clone, section 2
 export STORE=$WORK/stores                 # token stores, one subdir per tokenizer config
@@ -37,24 +37,18 @@ checkpoints contain no absolute paths, so they load anywhere `heptokens` is inst
 
 ```
 $TOKENIZERS/
-  tracks/cocoa_tracks_cb{K}_cd8_nq4_lr0.001_e100/{checkpoints/best.ckpt,full_config.yaml}          # positions-in
-  tracks/cocoa_tracks_posout_cb{K}_cd8_nq4_lr0.001_e100/{checkpoints/best.ckpt,full_config.yaml}   # positions-out
-  topos/cocoa_topos_cb{K}_cd8_nq4_lr0.001_e100/...
-  topos/cocoa_topos_posout_cb{K}_cd8_nq4_lr0.001_e100/...
-  truthpart/cocoa_truthpart_cb128_cd8_nq3_lr0.001/{checkpoints/best.ckpt,full_config.yaml}
+  MANIFEST.sha256                                                                   # verify: cd $TOKENIZERS && sha256sum -c MANIFEST.sha256
+  tracks_e100/cocoa_tracks_cb{K}_cd8_nq4_lr0.001_e100/{checkpoints/best.ckpt,full_config.yaml,SUCCESS.txt}          # positions-in
+  tracks_e100/cocoa_tracks_posout_cb{K}_cd8_nq4_lr0.001_e100/{checkpoints/best.ckpt,full_config.yaml,SUCCESS.txt}   # positions-out
+  topos_e100/cocoa_topos_cb{K}_cd8_nq4_lr0.001_e100/...
+  topos_e100/cocoa_topos_posout_cb{K}_cd8_nq4_lr0.001_e100/...
+  truthpart/cocoa_truthpart_cb128_cd8_nq3_lr0.001/{checkpoints/best.ckpt,full_config.yaml,SUCCESS.txt}
 ```
 
-S3DF source: `/sdf/data/atlas/u/jkrupa/heptokens/results/cocoa_scan/{tracks_e100,topos_e100,truthpart}/<run>/`.
-Use a run only once its `SUCCESS.txt` exists (training finished: 100 epochs). K in {256, 1024, 4096}.
-Copy them with, for example:
-
-```bash
-# on S3DF, from /sdf/data/atlas/u/jkrupa/heptokens/results/cocoa_scan
-tar czf heptokens_tokenizers.tgz \
-  {tracks_e100,topos_e100}/cocoa_*_cb{256,1024,4096}_cd8_nq4_lr0.001_e100/{checkpoints/best.ckpt,full_config.yaml,SUCCESS.txt} \
-  {tracks_e100,topos_e100}/cocoa_*_posout_cb{256,1024,4096}_cd8_nq4_lr0.001_e100/{checkpoints/best.ckpt,full_config.yaml,SUCCESS.txt} \
-  truthpart/cocoa_truthpart_cb128_cd8_nq3_lr0.001/{checkpoints/best.ckpt,full_config.yaml}
-```
+K in {256, 1024, 4096}. These are copied from S3DF
+(`/sdf/data/atlas/u/jkrupa/heptokens/results/cocoa_scan/<same relative paths>`) by
+`scripts/copy_tokenizers_to_nersc.sh`, which only copies finished runs (`SUCCESS.txt`, 100 epochs).
+Start with whatever is present and verified; check `SUCCESS.txt` before using a run.
 
 ### 1b. Scalers
 
