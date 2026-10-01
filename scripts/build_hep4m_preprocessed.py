@@ -82,6 +82,8 @@ def get_args():
     p.add_argument("--track_ckpt", type=str, default=None)
     p.add_argument("--topo_ckpt", type=str, default=None)
     p.add_argument("--truthpart_ckpt", type=str, default=None)
+    # Add {mod}_cont.npy (scaled float32 features, same rows as {mod}_data.npy) to an existing export.
+    p.add_argument("--cont_only", action="store_true")
     args = p.parse_args()
     for mod in ("track", "topo", "truthpart"):
         override = getattr(args, f"{mod}_ckpt")
@@ -91,43 +93,63 @@ def get_args():
 
 
 @torch.no_grad()
-def tokenize_modality(spec, files, args, device):
-    """Return (data int16 [Ntok, nq], offsets int64 [E+1], event_numbers int64 [E])."""
+def tokenize_modality(spec, files, args, device, with_tokens=True, cont_path=None):
+    """Return (data int16 [Ntok, nq] | None, offsets int64 [E+1], event_numbers int64 [E], nq, n_feat).
+
+    If cont_path is given, the scaled csts (float32 [Ntok, n_feat]) are streamed there in
+    the same row order as the tokens.
+    """
     ds = spec["ds"](files, max_csts=spec["max_csts"], num_events=args.num_events)
     scaler = joblib.load(spec["scaler"])
     loader = torch.utils.data.DataLoader(
         ds, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=False,
         collate_fn=partial(collate_and_transform, transforms={"preprocess": partial(preprocess_batch, cst_fn=scaler)}),
     )
-    model = LitVqVae.load_from_checkpoint(spec["ckpt"], map_location=device).to(device).eval()
-    nq = int(model.hparams.num_quantizers)
+    model, nq = None, 0
+    if with_tokens:
+        model = LitVqVae.load_from_checkpoint(spec["ckpt"], map_location=device).to(device).eval()
+        nq = int(model.hparams.num_quantizers)
+    cont_f = open(cont_path, "wb") if cont_path is not None else None
+    n_feat = None
 
     rows, counts, evnums = [], [], []
     for batch in loader:
         gpu = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
-        indices = model.encode_indices(gpu)  # [B, n, nq], -1 on padding
         # Batch-level transfer to CPU/numpy ONCE (per-event .item()/.cpu() would
         # force a GPU sync per event and is ~1000x slower).
-        idx_np = indices.to(torch.int16).cpu().numpy()
+        if model is not None:
+            idx_np = model.encode_indices(gpu).to(torch.int16).cpu().numpy()  # [B, n, nq], -1 on padding
         mask_np = gpu["mask"].cpu().numpy()
         pt_np = gpu["csts"][:, :, args.pt_idx].float().cpu().numpy()
+        if cont_f is not None:
+            csts_np = gpu["csts"].float().cpu().numpy()
+            n_feat = csts_np.shape[-1]
+            cont_rows = []
         ev = batch["eventNumber"]
         ev_np = ev.numpy() if isinstance(ev, torch.Tensor) else np.asarray(ev)
         for i in range(mask_np.shape[0]):
             m = mask_np[i]
             k = int(m.sum())
             if k:
-                idx_i = idx_np[i][m]  # [k, nq]
-                pt_i = pt_np[i][m]
-                rows.append(idx_i[np.argsort(-pt_i, kind="stable")])
+                order = np.argsort(-pt_np[i][m], kind="stable")
+                if model is not None:
+                    rows.append(idx_np[i][m][order])  # [k, nq]
+                if cont_f is not None:
+                    cont_rows.append(csts_np[i][m][order])  # [k, n_feat]
             counts.append(k)
             evnums.append(int(ev_np[i]))
+        if cont_f is not None and cont_rows:
+            cont_f.write(np.concatenate(cont_rows, axis=0).astype(np.float32).tobytes())
 
-    data = np.concatenate(rows, axis=0) if rows else np.zeros((0, nq), dtype=np.int16)
+    if cont_f is not None:
+        cont_f.close()
+    data = None
+    if with_tokens:
+        data = np.concatenate(rows, axis=0) if rows else np.zeros((0, nq), dtype=np.int16)
     counts = np.asarray(counts, dtype=np.int64)
     offsets = np.zeros(len(counts) + 1, dtype=np.int64)
     offsets[1:] = np.cumsum(counts)
-    return data, offsets, np.asarray(evnums, dtype=np.int64), nq
+    return data, offsets, np.asarray(evnums, dtype=np.int64), nq, n_feat
 
 
 def main():
@@ -135,13 +157,29 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     files = root_files_from_dir(Path(args.data_dir) / args.split_dir)
     out = args.output_dir / args.split_name
-    out.mkdir(parents=True, exist_ok=True)
 
+    if args.cont_only:
+        # Row alignment against the existing token export is what the 4M dataset relies on.
+        ref_ev = np.fromfile(out / "event_numbers.npy", dtype=np.int64)
+        for mod in args.modalities:
+            cont_path = out / f"{mod}_cont.npy"
+            log.info(f"[{args.split_name}] exporting continuous {mod} -> {cont_path}")
+            _, offsets, ev, _, n_feat = tokenize_modality(
+                MODALITY_SPECS[mod], files, args, device, with_tokens=False, cont_path=cont_path)
+            ref_off = np.fromfile(out / f"{mod}_offsets.npy", dtype=np.int64)
+            if not (np.array_equal(ev, ref_ev) and np.array_equal(offsets, ref_off)):
+                cont_path.unlink()
+                raise RuntimeError(f"{mod}: continuous rows do not align with the token export in {out}")
+            np.savez(out / f"{mod}_cont_meta.npz", n_rows=int(offsets[-1]), n_feat=n_feat)
+            log.info(f"  {mod}: {len(ev):,} events, {int(offsets[-1]):,} rows x {n_feat} feats (aligned)")
+        return
+
+    out.mkdir(parents=True, exist_ok=True)
     ref_ev = None
     for mod in args.modalities:
         spec = MODALITY_SPECS[mod]
         log.info(f"[{args.split_name}] tokenizing {mod} ...")
-        data, offsets, ev, nq = tokenize_modality(spec, files, args, device)
+        data, offsets, ev, nq, _ = tokenize_modality(spec, files, args, device)
 
         data.tofile(out / f"{mod}_data.npy")
         offsets.tofile(out / f"{mod}_offsets.npy")
