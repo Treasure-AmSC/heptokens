@@ -1,146 +1,292 @@
-# Handoff: nanoHEP particle flow with heptokens tokenizers (positions-in vs positions-out)
+# nanoHEP particle flow at NERSC with heptokens tokenizers: agent runbook
 
-Goal: train **nanoHEP** (decoder-only GPT from `FM-for-HEP/hep-any2any`) for particle flow,
-`(track, topo) token IDs -> truthpart token IDs`, on **~89M events**, once per input tokenizer,
-and compare **positions-in** vs **positions-out** track/topo tokenizers. This runs on a different
-cluster than S3DF; everything needed is listed below.
+You are setting up and running **nanoHEP** (decoder-only GPT from `FM-for-HEP/hep-any2any`) for
+particle flow, `(track, topo) token IDs -> truth-particle token IDs`, on ~89M COCOA single-jet
+events at NERSC (Perlmutter). The point of the study is to compare **positions-in** and
+**positions-out** track/topo tokenizers trained in the `heptokens` repo. Work through the
+sections in order; every step ends with a check, so don't skip ahead when a check fails.
 
-## 1. Code (all on GitHub)
+Fill in the paths in section 0 first. Everything else refers to them.
 
-| repo | branch / commit | what you need from it |
-|---|---|---|
-| `treasure-slac/heptokens` (remote `origin`; also `Treasure-AmSC/heptokens`) | `feature/cocoa-dataloader` | tokenizers (`src/heptokens`), COCOA datasets incl. `position_features`, `PositionTokenizer`, token export `scripts/build_hep4m_preprocessed.py`, truthpart decode `scripts/pflow_decode_metrics.py`, scalers in `resources/` |
-| `FM-for-HEP/HEP4M` | `heptokens-tokenizer-adapter` | `hep4m/models/heptokens_adapter.py`: wraps a heptokens `LitVqVae` as a HEP4M tokenizer (`vae_type: heptokens`); port it into hep-any2any for decoding |
-| `FM-for-HEP/hep-any2any` | `main` (checked at `d5aac9b`) | nanoHEP: `hep4m/train_nano_hep.py`, `configs/train/nanohep_pflow.yml`, `hep4m/datasets/tokenized_memmap.py`, `hep4m/models/nano_hep/vocab.py`, inference `configs/infer/nanoHEP-pflow.yml` |
+---
 
-## 2. Artifacts to copy from S3DF (not in git)
+## 0. Paths (fill in)
 
-Tokenizer checkpoints (~20 MB each) + their `full_config.yaml` (defines features, position
-features, scaler, model size). Use `checkpoints/best.ckpt` **after** `SUCCESS.txt` exists.
+```bash
+export WORK=<scratch dir for this study, e.g. $SCRATCH/nanohep_pflow>
+export RAW_TRAIN=<dir with the ~89M-event training ROOT files>
+export RAW_VAL=<dir with validation ROOT files (disjoint from train)>
+export RAW_TEST=<dir with test ROOT files (disjoint from train and val)>
+export TOKENIZERS=<dir with the tokenizer runs copied from S3DF, layout in section 1>
+export HEPTOKENS=$WORK/heptokens          # clone, section 2
+export ANY2ANY=$WORK/hep-any2any          # clone, section 2
+export STORE=$WORK/stores                 # token stores, one subdir per tokenizer config
+export NERSC_ACCOUNT=<allocation, e.g. mXXXX>
+```
+
+---
+
+## 1. Inputs copied from S3DF
+
+### 1a. Tokenizer runs
+
+Each run directory needs `checkpoints/best.ckpt` (~20 MB) and `full_config.yaml`. The
+checkpoints contain no absolute paths, so they load anywhere `heptokens` is installed.
+`full_config.yaml` does contain S3DF paths (data dir, scaler file); use it for the
+**features, position features, max_csts and pos_tokenizer**, not for paths.
 
 ```
-/sdf/data/atlas/u/jkrupa/heptokens/results/cocoa_scan/tracks_e100/<run>/{checkpoints/best.ckpt,full_config.yaml}
-/sdf/data/atlas/u/jkrupa/heptokens/results/cocoa_scan/topos_e100/<run>/{checkpoints/best.ckpt,full_config.yaml}
-/sdf/data/atlas/u/jkrupa/heptokens/results/cocoa_scan/truthpart/cocoa_truthpart_cb128_cd8_nq3_lr0.001/{checkpoints/best.ckpt,full_config.yaml}
+$TOKENIZERS/
+  tracks/cocoa_tracks_cb{K}_cd8_nq4_lr0.001_e100/{checkpoints/best.ckpt,full_config.yaml}          # positions-in
+  tracks/cocoa_tracks_posout_cb{K}_cd8_nq4_lr0.001_e100/{checkpoints/best.ckpt,full_config.yaml}   # positions-out
+  topos/cocoa_topos_cb{K}_cd8_nq4_lr0.001_e100/...
+  topos/cocoa_topos_posout_cb{K}_cd8_nq4_lr0.001_e100/...
+  truthpart/cocoa_truthpart_cb128_cd8_nq3_lr0.001/{checkpoints/best.ckpt,full_config.yaml}
 ```
 
-The track/topo runs (all d=8, 100 epochs, cosine LR, Snakemake target `all_design_e100`) were
-still training on 2026-10-01 (about epoch 50-70 of 100):
+S3DF source: `/sdf/data/atlas/u/jkrupa/heptokens/results/cocoa_scan/{tracks_e100,topos_e100,truthpart}/<run>/`.
+Use a run only once its `SUCCESS.txt` exists (training finished: 100 epochs). K in {256, 1024, 4096}.
+Copy them with, for example:
 
-| group | runs (`<run>`) |
-|---|---|
-| positions-in | `cocoa_{tracks,topos}_cb4096_cd8_nq{2,3,4,6,8}_lr0.001_e100`, `cocoa_{tracks,topos}_cb{64,256,1024}_cd8_nq4_lr0.001_e100` |
-| positions-out | `cocoa_{tracks,topos}_posout_cb{256,1024,4096}_cd8_nq4_lr0.001_e100` |
+```bash
+# on S3DF, from /sdf/data/atlas/u/jkrupa/heptokens/results/cocoa_scan
+tar czf heptokens_tokenizers.tgz \
+  {tracks_e100,topos_e100}/cocoa_*_cb{256,1024,4096}_cd8_nq4_lr0.001_e100/{checkpoints/best.ckpt,full_config.yaml,SUCCESS.txt} \
+  {tracks_e100,topos_e100}/cocoa_*_posout_cb{256,1024,4096}_cd8_nq4_lr0.001_e100/{checkpoints/best.ckpt,full_config.yaml,SUCCESS.txt} \
+  truthpart/cocoa_truthpart_cb128_cd8_nq3_lr0.001/{checkpoints/best.ckpt,full_config.yaml}
+```
 
-**Comparison to run:** positions-in vs positions-out at the same (K, d=8, Q=4) for
-K in {256, 1024, 4096}; start with K=4096. The truthpart tokenizer is the same for every run
-(K=128, d=8, Q=3, positions-in).
+### 1b. Scalers
 
-Scalers (in git, `resources/`): tracks `cocoa_cst_log_standard.joblib` (posout:
-`..._posout.joblib`), topos `cocoa_topo_log_standard.joblib` (posout: `..._posout.joblib`),
-truthpart `cocoa_truthpart_log_standard.joblib`. Each run's `full_config.yaml` names the one it used.
+In the heptokens repo (`resources/`, committed): tracks `cocoa_cst_log_standard.joblib`
+(positions-out: `cocoa_cst_log_standard_posout.joblib`), topos `cocoa_topo_log_standard.joblib`
+(positions-out: `cocoa_topo_log_standard_posout.joblib`), truthpart
+`cocoa_truthpart_log_standard.joblib`. The scaler must match the tokenizer: `full_config.yaml`
+-> `datamodule.transforms.preprocess.cst_fn.filename` names it (take the basename).
 
-### Raw data: the 89M events are NOT on S3DF as ROOT
+### 1c. Raw ROOT
 
-- Our tokenizers need raw COCOA ROOT files (tree `EventTree`; branches `track_*`, `topo_*`,
-  `particle_*`, `eventNumber`). On S3DF there are only:
-  `.../treasure/4m/data_new/COCOA_samples_singlejet/{train_topup2_20M_cells256 (20.0M), val_100K_cells256 (99,955), test_1M_cells256_isInfFalse}`
-  and `.../treasure/4m_sam/Jeff_ROOT_data` (24.1M; 1 unreadable file; its segments overlap our val (1) and test (10) segments).
-- `.../treasure/4m_sam/Nilotpal_89Mtokens_numpy_topo_0p5gev` is an 89M **token** store made with the
-  original HEP4M tokenizers (track/topo K=256 Q=3 + 3 position tokens); it cannot be re-encoded.
-  Its topo has 88,741,573 events vs 88,929,883 for the others.
-- **Action:** locate the raw ~89M COCOA single-jet sample (the one behind the Nilotpal store / the
-  hep-any2any release, "not in the record" per its README), and make sure it has no events from the
-  val/test files you evaluate on (check `eventNumber` / file segments).
+COCOA single-jet ROOT files, tree `EventTree`, with branches `track_{pt,eta,phi,d0,z0}`,
+`topo_{eta,phi,e,rho,sigma_eta,sigma_phi,ecal_e,hcal_e}`, `particle_{pt,eta,phi,e,pdgid,track_idx,...}`,
+`eventNumber`. **Check (step 4.1):** every file opens, the branches exist, and no `eventNumber` is
+shared between train and val/test (on S3DF one 24M sample overlapped the val/test segments).
 
-## 3. What to build
+---
 
-### 3a. Token store export (heptokens env)
+## 2. Code and environments
 
-`scripts/build_hep4m_preprocessed.py` already writes the exact layout nanoHEP reads
-(`{mod}_data.npy` int16 `[rows, n_codebooks + n_pos_codebooks]`, `{mod}_offsets.npy` int64,
-`{mod}_meta.npz`, `{mod}_is_empty.npy`, `event_numbers.npy`), but needs these changes:
+```bash
+cd $WORK
+git clone -b feature/cocoa-dataloader git@github.com:treasure-slac/heptokens.git   # or Treasure-AmSC/heptokens
+git clone git@github.com:FM-for-HEP/hep-any2any.git                                # main (checked at d5aac9b)
+git clone -b heptokens-tokenizer-adapter git@github.com:FM-for-HEP/HEP4M.git       # only for hep4m/models/heptokens_adapter.py
+```
 
-1. **Build the dataset from the checkpoint's `full_config.yaml`**, not the hard-coded
-   `MODALITY_SPECS`: `datamodule.features`, `datamodule.position_features`, `max_csts`, and the
-   scaler. Positions-out tracks use features `[track_pt, track_d0, track_z0]` + positions
-   `[track_eta, track_phi]`; positions-out topos `[topo_e, topo_rho, topo_sigma_eta, topo_sigma_phi, topo_ecal_e, topo_hcal_e]` + `[topo_eta, topo_phi]`.
-2. **Positions-out: write position tokens.** The dataset returns `batch["positions"]` =
-   (eta, cos phi, sin phi) (`heptokens.data.cocoa_base.eta_phi_to_eta_cossin`). Bin them with
+- **heptokens** (tokenizers, COCOA datasets, token export, truthpart decoding): `cd $HEPTOKENS && pixi install`.
+  Run its Python as `pixi run --manifest-path $HEPTOKENS/pyproject.toml python ...`.
+- **hep-any2any** (nanoHEP train/infer/report): `cd $ANY2ANY && pixi install` (CUDA env), and
+  `cp .env.example .env`, then set in `.env`:
+  `HEP4M_DATA=$WORK/any2any_data`, `HEP4M_WORK=$WORK/any2any_work`, `HEP4M_TOKENIZED=<store dir of the run>`,
+  `HEP4M_LOGGER=wandb` (or `csv`). `python -m hep4m.paths` prints the resolved paths.
+- The two repos have **different** `vector-quantize-pytorch` versions (heptokens 0.2.2, hep-any2any 1.22).
+  Load heptokens tokenizers only in the heptokens env (export, decoding). Never load them in the hep-any2any env.
+- Perlmutter GPU nodes: 4x A100 per node. Use `-C gpu -A $NERSC_ACCOUNT -q regular --gpus-per-node 4`;
+  jobs are capped at 48 h, and nanoHEP resumes from `checkpoints/last.ckpt` (section 6).
+
+**Check:** in the heptokens env, `python -c "from heptokens.models.vq_vae import LitVqVae; LitVqVae.load_from_checkpoint('$TOKENIZERS/truthpart/cocoa_truthpart_cb128_cd8_nq3_lr0.001/checkpoints/best.ckpt', map_location='cpu')"` succeeds.
+
+---
+
+## 3. What the model does (so you know what you're building)
+
+- One sequence per jet: `<MOD_OUT:truthpart> <TASK_SEP> <MOD_IN:topo>`, then the track and topo
+  elements interleaved (track, topo, track, topo, ..., then the remainder), then
+  `<MOD_OUT:truthpart>`, the truth particles one by one, and `<EOS>`, right-padded to `block_size`.
+- Element tokens: Q=4 content codes per track/topo; **positions-out** adds 3 position tokens
+  (eta, cos phi, sin phi, 1024 bins each). Truth particles: 3 codes (truthpart tokenizer K=128,
+  Q=3, positions-in), no position tokens.
+- Loss: next-token cross-entropy on the truth-particle tokens and `<EOS>` only. At inference the
+  model generates until `<EOS>`, so it also chooses the number of particles.
+- Order matters: elements are interleaved and generated in on-disk order, which must be
+  pT/energy-descending (section 4.2, item 4).
+
+---
+
+## 4. Build the token stores (heptokens env)
+
+One store per **tokenizer config** = (positions-in | positions-out, K). The truthpart tokens are
+identical across stores, so tokenize truthpart once and copy/symlink `truthpart_*` into each store.
+Layout per split (what nanoHEP reads, `hep-any2any/hep4m/datasets/tokenized_memmap.py`):
+
+```
+$STORE/<config>/{train,val,test}/
+    {track,topo,truthpart}_data.npy      headerless int16 [n_rows, n_codebooks + n_pos_codebooks]
+    {track,topo,truthpart}_offsets.npy   headerless int64 [n_events + 1]
+    {track,topo,truthpart}_meta.npz      n_events, n_codebooks, n_pos_codebooks
+    {track,topo,truthpart}_is_empty.npy  int64 indices of events with no objects
+    event_numbers.npy                    headerless int64 [n_events], identical order for all modalities
+```
+
+### 4.1 Validate the raw data
+
+For train/val/test: count events per file, check the branches in 1c, and check that train and
+val/test share no `eventNumber`. Record the event counts.
+
+### 4.2 Adapt `scripts/build_hep4m_preprocessed.py`
+
+The script already writes the layout above, but it was written for S3DF and positions-in only.
+Change it so that:
+
+1. **Paths:** no hard-coded `WS = /sdf/...` and no default `--data_dir`. Take `--data_dir`,
+   `--track_ckpt/--topo_ckpt/--truthpart_ckpt`, and scaler paths (or resolve the scaler from the
+   repo's `resources/` by the basename in `full_config.yaml`). Use `root_files_from_dir`, which globs
+   `*.root`; pass the train/val/test dirs from section 0.
+2. **Dataset from the tokenizer's `full_config.yaml`:** `datamodule.features`,
+   `datamodule.position_features` (absent or null for positions-in) and `max_csts` (tracks 15,
+   topos 50, truthpart 16). For reference:
+   - positions-out tracks: features `[track_pt, track_d0, track_z0]`, positions `[track_eta, track_phi]`
+   - positions-out topos: features `[topo_e, topo_rho, topo_sigma_eta, topo_sigma_phi, topo_ecal_e, topo_hcal_e]`, positions `[topo_eta, topo_phi]`
+   - positions-in: the 5 track / 8 topo features including eta/phi; no positions.
+3. **Positions-out: write position tokens.** With `position_features` the dataset returns
+   `batch["positions"]` = (eta, cos phi, sin phi). Bin them with
    `heptokens.models.pos_tokenizer.PositionTokenizer(ranges=[(-3,3),(-1,1),(-1,1)], n_bins=1024)`
-   (exactly the config in `full_config.yaml` under `callbacks.reconstruction_monitor.pos_tokenizer`)
-   and append the 3 indices after the content codes; set `n_pos_codebooks=3` in `{mod}_meta.npz`.
-   This matches nanoHEP's default position vocabulary (`pos_codebook_size=1024`, `num_q_pos=3`).
-   Positions-in: `n_pos_codebooks=0`.
-3. **Stream per ROOT file.** The map-style COCOA datasets load everything into RAM (topos at 89M
-   would be ~140 GB of float32). Loop over files, append to the output files, then write offsets.
-4. **Sort order:** nanoHEP interleaves track/topo elements in on-disk order and generates truth
-   particles in on-disk order. Sort tracks by `track_pt`, **topos by `topo_e`**, truthpart by
-   `truthpart_pt`, all descending. The current script sorts by raw column 0 (`--pt_idx 0`),
-   which is `topo_eta` for positions-in topos (wrong) and `topo_e` for positions-out topos.
-5. Same event set and order for all three modalities (the script already asserts identical
-   `eventNumber` order); export `train`, `val`, `test` splits.
+   (instantiate it from `callbacks.reconstruction_monitor.pos_tokenizer` in `full_config.yaml`),
+   append the 3 indices after the Q content codes, and write `n_pos_codebooks=3` in `{mod}_meta.npz`.
+   Positions-in: `n_pos_codebooks=0`. This matches nanoHEP's default position vocabulary
+   (`pos_codebook_size=1024`, `num_q_pos=3`).
+4. **Sort order:** sort each event's elements descending by **track_pt** (tracks), **topo_e**
+   (topos), **particle pt** (truthpart), using the same sort for content and position columns.
+   The current `--pt_idx 0` sorts by column 0 of the scaled features, which is `topo_eta` for
+   positions-in topos (wrong) and `topo_e` for positions-out topos. Choose the column by
+   feature name.
+5. **Stream file by file.** The COCOA map-style datasets hold every event in RAM (89M topos are
+   ~140 GB of float32). Process one ROOT file (or a few) at a time, append rows to the open
+   `{mod}_data.npy`, collect per-event counts and event numbers, and write `offsets`, `meta`,
+   `is_empty` and `event_numbers` at the end. Use a GPU for `encode_indices`, and a SLURM array
+   over files for train if one job is too slow (then concatenate in file order).
+6. **Alignment:** all three modalities must have the same events in the same order. Keep the
+   existing `event_numbers` equality assert. Note the 16-particle / 15-track / 50-topo caps
+   truncate <1% of events; report how many.
 
-### 3b. nanoHEP config (hep-any2any)
+### 4.3 Checks on each store
 
-Copy `configs/train/nanohep_pflow.yml` and change:
+- `meta.npz`: `n_codebooks` (4 track/topo, 3 truthpart), `n_pos_codebooks` (3 positions-out, else 0),
+  identical `n_events` across the three modalities and equal to the raw count from 4.1.
+- Code ranges: content `< K` (`< 128` for truthpart), positions `< 1024`, no negatives.
+- Mean multiplicities per event (S3DF 20M sample: tracks 3.62, topos 12.95, truth particles 6.75).
+- Spot-check 10 events: re-encode them in a notebook and compare to the stored rows; positions-out
+  position tokens decode (`PositionTokenizer.decode`) to within half a bin of the raw eta/cos/sin.
 
-- `tokenized_root:` your store; `all_modalities: [topo, track, truthpart]`.
-- `vocab_args:` must give **all** four dicts (`Vocab.build` defaults are the HEP4M tokenizers):
-  ```yaml
-  vocab_args:
-      modalities: [topo, track, truthpart]
-      codebook_sizes:     {topo: 4096, track: 4096, truthpart: 128}
-      num_quantizers:     {topo: 4,    track: 4,    truthpart: 3}
-      pos_codebook_sizes: {topo: 1024, track: 1024, truthpart: 1024}
-      num_q_pos:          {topo: 3,    track: 3,    truthpart: 0}   # positions-in: topo 0, track 0
-  ```
-  With `num_q_pos=0` the loader emits no position tokens; leaving the default (3) would insert 3
-  dummy zero tokens per element.
-- `block_size` (data) and `gpt_config.block_size`: sequence = 2 + 1 + sum_elements(width) + 1 +
-  N_truth*3 + 1, width = Q (+3 positions-out). Caps are 15 tracks, 50 topos, 16 truth
-  particles: positions-in Q=4 max 313, positions-out Q=4 max 508. Sequences longer than
-  `block_size` are silently truncated, so use 512 for both (`gpt_config.block_size` >= that).
-- `pflow_eval.modality_dict_path` / Detokenizer: see 3c, or set `pflow_eval.enabled: false`.
+---
 
-### 3c. Decoding truthpart tokens
+## 5. Configure nanoHEP (hep-any2any)
 
-hep-any2any's `Detokenizer` loads HEP4M VQ-VAEs from a modality dict. Either port
-`heptokens_adapter.py` (HEP4M branch above) so a modality dict entry with `vae_type: heptokens`
-decodes through heptokens, or decode offline with heptokens'
-`scripts/pflow_decode_metrics.py` (token IDs -> pt/eta/phi/E/class via the truthpart `LitVqVae`
-+ inverse scaler) followed by `hep4m.performance.pflow_report.run_report` (IQR/median).
+Start from `configs/train/nanohep_pflow.yml` (paper recipe) and make one config per store.
 
-### 3d. Inference + metric
+```yaml
+run_name: nanohep_pflow_<config>              # e.g. posin_K4096 / posout_K4096
+tokenized_root: <$STORE/<config>>
+all_modalities: [topo, track, truthpart]
+vocab_args:                                    # give all four dicts; the defaults are the HEP4M tokenizers
+    modalities: [topo, track, truthpart]
+    codebook_sizes:     {topo: <K>, track: <K>, truthpart: 128}
+    num_quantizers:     {topo: 4,   track: 4,   truthpart: 3}
+    pos_codebook_sizes: {topo: 1024, track: 1024, truthpart: 1024}
+    num_q_pos:          {topo: <3 posout | 0 posin>, track: <3 | 0>, truthpart: 0}
+block_size: 512                                # data sequence length
+gpt_config: {block_size: 640, n_layer: 12, n_head: 12, n_embd: 768, dropout: 0.0, bias: false, vocab_size: null}
+pflow_eval: {enabled: false}                   # until section 7a is done
+```
 
-`python -m hep4m.eval_hep4m -i configs/infer/nanoHEP-pflow.yml` (model_type `nano_hep`, argmax).
-Metric (same as the paper / 4M runs): jet pT = four-vector sum of decoded truth-particle
-predictions; resolution = (P75 - P25)/median of pT_reco/pT_truth; bootstrap errors.
-**Cardinality:** nanoHEP chooses how many particles to emit (EOS); our HEP4M numbers used the true
-multiplicity (`use_truth_cardinality: true`). Report nanoHEP as-is, and if possible also with the
-multiplicity forced to the truth, so it can be compared with the HEP4M results below.
+- **Sequence length:** 2 + 1 + sum over input elements of width + 1 + 3*N_truth + 1, width = 4
+  (positions-in) or 7 (positions-out). Max with the caps: 313 (positions-in), 508 (positions-out).
+  Longer sequences are **silently truncated**, so keep `block_size: 512` for every config
+  and check on the store that no event exceeds it.
+- **Model size:** 12 layers x 768 is about 85M in the transformer plus vocab x 768 shared
+  embedding/output (vocab 32,777 positions-in / 38,921 positions-out at K=4096): about 110M / 115M.
+  A smaller option: 6 layers x 256 (8 heads) is about 13-15M; 8 x 128 (4 heads) is about 6M.
+  Pick one size and use it for every tokenizer config.
+- **Recipe (paper):** 4 GPUs, bf16, batch 128 x accumulate 2 x 4 GPUs = 1024 sequences/step,
+  360k steps (~4 passes over 89M), AdamW lr 1.2e-3 -> 1.2e-4 cosine, 2k warmup. Keep the recipe
+  identical across tokenizer configs.
 
-## 4. Smoke tests before the full runs
+**Checks:**
+1. `Vocab.build(**vocab_args)`; build 5 samples with `TokenizedMemmapDataset` on the val store;
+   `vocab.decode_element_with_pos` must return the stored codes; print one decoded sequence and
+   confirm the layout of section 3.
+2. Over the whole val store: no sequence reaches `block_size`.
+3. `configs/train/nanohep_pflow_tiny.yml` with your `vocab_args`/store/`block_size`: 50 steps on CPU or one GPU,
+   loss finite and falling, checkpoint written and reloadable.
 
-1. Export ~10k events per tokenizer; check `meta.npz` (n_codebooks, n_pos_codebooks), code
-   ranges (`< K`, positions `< 1024`), identical `event_numbers` across modalities.
-2. `Vocab.build(**vocab_args)`; build 5 samples with `TokenizedMemmapDataset`; check
-   `decode_element_with_pos` round-trips the stored codes and no sequence hits `block_size`.
-3. Decode the stored truthpart tokens of the val split (no model) and compute IQR/median: this
-   is the output-tokenizer floor that every run includes.
-4. `configs/train/nanohep_pflow_tiny.yml` with your vocab for ~50 steps, then inference + metric
-   on a few hundred events end-to-end.
+---
 
-## 5. Compute
+## 6. Train
 
-The paper recipe (`nanohep_pflow.yml`): 4 GPUs, bf16, batch 128 x accum 2 x 4 GPUs = 1024
-sequences/step, 360k steps (~4 passes over 89M), cosine LR 1.2e-3 -> 1.2e-4. One run per
-tokenizer; positions-in/out at K=4096 first (2 runs), then K=256/1024.
+```bash
+cd $ANY2ANY
+srun pixi run python -m hep4m.train_nano_hep -ct configs/train/<your config>.yml        # new run
+srun pixi run python -m hep4m.train_nano_hep -edir <run dir>                            # resume from last.ckpt
+```
 
-## 6. Reference results (HEP4M 4M model, S3DF, for context)
+Run under `sbatch -C gpu -A $NERSC_ACCOUNT -q regular -N 1 --gpus-per-node 4 -t 48:00:00`;
+resubmit with `-edir` until `max_steps`. Order: positions-in K=4096 and positions-out K=4096
+first, then K=1024, then K=256. Log to wandb; record the run dir, steps reached and wall time
+per run.
 
-Val 99,840 events, true multiplicity, 20M training events, truthpart cb128/Q=3 output:
-- Positions-in d=8/8 Q=3 (K=64..4096): IQR/median 0.148, 0.138, 0.135, 0.135.
-- Track d=4 / topo d=8, Q=4: 0.144, 0.137, 0.138, 0.133.
-- Continuous inputs (MLP input head, same trunk): 0.1285.
-Code: heptokens `workflow/Snakefile` rules `*_pflow_*`; HEP4M branch above.
+---
+
+## 7. Inference and metric
+
+### 7a. Decoding truth-particle tokens
+
+hep-any2any's `Detokenizer` (`hep4m/decoding/detokenizer.py`) builds HEP4M VQ-VAEs from a
+modality dict and can't read heptokens checkpoints, and `hep4m/evaluations/nano_hep_inference_helper.py`
+always calls it inline (truth side from the store, reco side from the generated tokens). Pick one:
+- **Offline (recommended):** add an option to the nanoHEP inference helper that skips the
+  `Detokenizer` and writes the **local** truthpart token IDs instead: per event
+  `truthpart_truth_tokens` (flat `[N_truth*3]`), `truthpart_reco_tokens` (flat `[N_reco*3]`, from
+  `vocab.decode_element_with_pos`), `truthpart_truth_card`, `truthpart_reco_card`. Then decode in the
+  heptokens env with `scripts/pflow_decode_metrics.py` (token IDs -> pt, eta, phi, E, class via the
+  truthpart `LitVqVae` + inverse scaler, writes a `pflow_report`-compatible ROOT). That script
+  currently reads `truthpart_reco_token_logits` and argmaxes them, and assumes reco and truth have the
+  same count. Add a path that reads `truthpart_reco_tokens` directly with its own cardinality.
+- **In-process:** port `HEP4M/hep4m/models/heptokens_adapter.py` (branch `heptokens-tokenizer-adapter`)
+  into hep-any2any so a modality dict entry `vae_type: heptokens` works. Because of the
+  vector-quantize-pytorch version clash, the heptokens decode has to run in a separate process/env.
+
+### 7b. Generate
+
+`python -m hep4m.eval_hep4m -i configs/infer/nanoHEP-pflow.yml` with `model_type: nano_hep`,
+your checkpoint, `nano_hep.tokenized_root` = the store, `split: test`, argmax decoding,
+`max_new_tokens` >= 3*16 + 1.
+
+### 7c. Metric
+
+`hep4m.performance.pflow_report.run_report(<decoded physics ROOT>, <outdir>, output_modality="truthpart")`
+writes `metrics.json`. Headline: `resolution_iqr_over_median` = (P75 - P25) / median of
+pT_reco/pT_truth, where each jet pT is the four-vector sum of its decoded particles; errors are
+the bootstrap std. Also report median response, mean predicted multiplicity vs truth, and token
+accuracy.
+
+**Cardinality:** nanoHEP chooses how many particles to emit. The S3DF HEP4M reference below used
+the true multiplicity. Report nanoHEP as-is, and if you can, also with generation forced to the
+true number of particles (stop at N_truth, ignore early EOS), for a direct comparison.
+
+**Floor:** decode the **stored** truthpart tokens of the test split (no model) and compute the
+same metric. Every run includes this output-tokenizer floor; report it alongside.
+
+---
+
+## 8. Deliverables
+
+A table: config (positions-in/out, K, Q=4, bits per element = 4*log2 K, +30 for positions-out) |
+steps | val loss | test IQR/median +- err | median response | mean multiplicity (pred/true) |
+token accuracy | run dir. Plus the floor from 7c and the store event counts from 4.
+
+## Reference (S3DF, HEP4M 4M model, 20M training events, 99,840 val events, true multiplicity)
+
+| input | IQR/median |
+|---|---|
+| positions-in d=8/8, Q=3, K=64 / 256 / 1024 / 4096 | 0.148 / 0.138 / 0.135 / 0.135 |
+| track d=4, topo d=8, Q=4, K=64 / 256 / 1024 / 4096 | 0.144 / 0.137 / 0.138 / 0.133 |
+| continuous inputs (MLP input head, same trunk) | 0.1285 |
