@@ -2100,8 +2100,10 @@ PFLOW_TAG = config.get("pflow_tag", f"nq{PFLOW_SWEEP_NQ}_trkcd{PFLOW_SWEEP_CD_TR
 PFLOW_SWEEP_DIR = PFLOW_SWEEP_ROOT / PFLOW_TAG
 PFLOW_TOK_DIR   = PFLOW_SWEEP_TOK_ROOT + "/" + PFLOW_TAG
 # Export runs the heptokens env; train runs the HEP4M env (script cd's to $HEP4M).
-PFLOW_EXPORT_SLURM = f"sbatch --wait -A {SLURM_ACCOUNT} -p {SLURM_PARTITION} -t 480 --mem=100G --gres=gpu:1 --cpus-per-task=8 -D {WORKSPACE}"
-PFLOW_TRAIN_SLURM  = f"sbatch --wait -A {SLURM_ACCOUNT} -p {SLURM_PARTITION} -t 7000 --mem=100G --gres=gpu:1 --cpus-per-task=8 -D {WORKSPACE}"
+_PFLOW_EXCLUDE = f" --exclude={config['exclude_nodes']}" if config.get("exclude_nodes") else ""
+PFLOW_EXPORT_SLURM = f"sbatch --wait -A {SLURM_ACCOUNT} -p {SLURM_PARTITION} -t 480 --mem=100G --gres=gpu:1 --cpus-per-task=8 -D {WORKSPACE}" + _PFLOW_EXCLUDE
+PFLOW_TRAIN_SLURM  = f"sbatch --wait -A {SLURM_ACCOUNT} -p {SLURM_PARTITION} -t 7000 --mem=100G --gres=gpu:1 --cpus-per-task=8 -D {WORKSPACE}" + _PFLOW_EXCLUDE
+PFLOW_EVAL_SLURM   = SLURM + _PFLOW_EXCLUDE
 
 def _pflow_track_ckpt(wc):
     return cocoa_output_dir / f"tracks/cocoa_tracks_cb{wc.cs}_cd{PFLOW_SWEEP_CD_TRACK}_nq{PFLOW_SWEEP_NQ}_lr0.001/checkpoints/best.ckpt"
@@ -2174,7 +2176,7 @@ rule eval_pflow_point:
     output:
         metrics = PFLOW_SWEEP_DIR / "cs{cs}/eval/metrics.json",
     params:
-        slurm = SLURM,
+        slurm = PFLOW_EVAL_SLURM,
         reduce = PFLOW_EVAL_REDUCE,
         tag = PFLOW_TAG,
     wildcard_constraints:
@@ -2259,7 +2261,7 @@ rule eval_pflow_cont:
     output:
         metrics = PFLOW_CONT_DIR / "eval/metrics.json",
     params:
-        slurm = SLURM,
+        slurm = PFLOW_EVAL_SLURM,
         env = f"PFLOW_PP_DIR={PFLOW_CONT_PP}",
         args = f"{PFLOW_CONT_CS} {PFLOW_CONT_TAG} {PFLOW_EVAL_REDUCE}",
         tag = PFLOW_CONT_TAG,
@@ -2278,6 +2280,7 @@ rule eval_pflow_cont:
 # Shells are copies of train_tokenizer/test_tokenizer and train/test_cocoa_{tracks,topos}
 # with cst_fn and free-form `extra` / `test_extra` override slots (empty unless needed).
 import yaml
+import itertools
 
 # These shells only run `sbatch --wait` for the ampere job, so run them on the driver host
 # instead of as idle turing wrapper jobs.
@@ -2298,9 +2301,11 @@ JETSET_LARGE_ARCH = " ".join(
 # Inner ampere sbatch for the design rules; identical to SLURM unless --config exclude_nodes=... is given.
 DESIGN_SLURM = SLURM + (f" --exclude={config['exclude_nodes']}" if config.get("exclude_nodes") else "")
 
-def _design(group, project, cb, cd, nq, cst_fn, extra="", test_extra="", recon_idx=""):
+def _design(group, project, cb, cd, nq, cst_fn, extra="", test_extra="", recon_idx="", max_epochs=50, patience=15,
+            slurm=None, test_slurm=None):
     return dict(group=group, project=project, cb=cb, cd=cd, nq=nq, cst_fn=cst_fn, extra=extra,
-                test_extra=test_extra, recon_idx=recon_idx)
+                test_extra=test_extra, recon_idx=recon_idx, max_epochs=max_epochs, patience=patience,
+                slurm=slurm or DESIGN_SLURM, test_slurm=test_slurm or DESIGN_SLURM)
 
 def _jetset_name(cb, cd, nq, suffix=""):
     return f"transformer_vqvae_enc_large_cb{cb}_cd{cd}_nq{nq}_lr0.0003_cw1.0_nj10000000{suffix}"
@@ -2381,6 +2386,41 @@ for cb, cd in product([256, 1024, 4096], [4, 8, 12]):
 # These tracks Q=3 references were trained with max_epochs=200 / patience=20; retrain at the scan recipe (50 / 15).
 for cb, cd in [(64, 4), (256, 2), (256, 4), (1024, 2), (1024, 4)]:
     design_tracks[f"cocoa_tracks_cb{cb}_cd{cd}_nq3_lr0.001_e50"] = _design("recipe", "tracks_e50", cb, cd, 3, COCOA_CST_FN)
+
+# ── Design-figure panels (a), (b), (d) at d = 8, trained to convergence: 100 epochs, cosine over all 100,
+# early stopping effectively off (patience = max_epochs). Jobs are spread over accounts; topo on turing,
+# tracks on ampere unless --config e100_tracks_partition=turing.
+E100_EPOCHS = 100
+
+def _sbatch(account, partition, mem):
+    s = f"sbatch --wait -A {account} -p {partition} -t 7000 --mem={mem} --gres=gpu:1 -D {WORKSPACE}"
+    if partition == "ampere" and config.get("exclude_nodes"):
+        s += f" --exclude={config['exclude_nodes']}"
+    return s
+
+_E100_SLURM = {
+    "ampere": itertools.cycle([_sbatch(a, "ampere", "100G") for a in ("mli:diffpg@ampere", "atlas:compef@ampere", "atlas:usatlas@ampere")]),
+    "turing": itertools.cycle([_sbatch(a, "turing", "90G") for a in ("mli:diffpg@turing", "atlas:compef@turing")]),
+}
+_E100_TEST_SLURM = _sbatch("mli:diffpg@turing", "turing", "90G")
+_E100_TRACKS_PART = config.get("e100_tracks_partition", "ampere")
+_E100_POSIN = [(4096, nq) for nq in (2, 3, 4, 6, 8)] + [(cb, 4) for cb in (64, 256, 1024)]
+
+def _e100(project, cb, nq, cst_fn, partition, **kw):
+    return _design("e100", project, cb, 8, nq, cst_fn, max_epochs=E100_EPOCHS, patience=E100_EPOCHS,
+                   slurm=next(_E100_SLURM[partition]), test_slurm=_E100_TEST_SLURM, **kw)
+
+for cb, nq in _E100_POSIN:
+    design_tracks[f"cocoa_tracks_cb{cb}_cd8_nq{nq}_lr0.001_e100"] = _e100("tracks_e100", cb, nq, COCOA_CST_FN, _E100_TRACKS_PART)
+    design_topos[f"cocoa_topos_cb{cb}_cd8_nq{nq}_lr0.001_e100"] = _e100(
+        "topos_e100", cb, nq, COCOA_TOPO_CST_FN, "turing", recon_idx=TOPO_POSIN_RECON_IDX)
+for cb in (256, 1024, 4096):
+    design_tracks[f"cocoa_tracks_posout_cb{cb}_cd8_nq4_lr0.001_e100"] = _e100(
+        "tracks_e100", cb, 4, _posout_scaler("cocoa_cst_log_standard"), _E100_TRACKS_PART,
+        extra=TRACKS_POSOUT, test_extra=TRACKS_POSOUT)
+    design_topos[f"cocoa_topos_posout_cb{cb}_cd8_nq4_lr0.001_e100"] = _e100(
+        "topos_e100", cb, 4, _posout_scaler("cocoa_topo_log_standard"), "turing",
+        extra=TOPOS_POSOUT, test_extra=TOPOS_POSOUT, recon_idx="+callbacks.reconstruction_monitor.energy_idx=0")
 
 def _design_targets(lookup, root, marker, groups):
     return [str(root / c["project"] / name / marker) for name, c in lookup.items() if c["group"] in groups]
@@ -2549,7 +2589,9 @@ rule train_design_tracks:
         num_quantizers = _design_param(design_tracks, "nq"),
         cst_fn = _design_param(design_tracks, "cst_fn"),
         extra = _design_param(design_tracks, "extra"),
-        slurm = DESIGN_SLURM,
+        max_epochs = _design_param(design_tracks, "max_epochs"),
+        patience = _design_param(design_tracks, "patience"),
+        slurm = _design_param(design_tracks, "slurm"),
     wildcard_constraints:
         design_project = "|".join(sorted({c["project"] for c in design_tracks.values()})),
         design_name = "|".join(design_tracks),
@@ -2579,7 +2621,7 @@ rule train_design_tracks:
                 model.learning_rate=0.001 \
                 model.optimizer.lr=0.001 \
                 +model.commitment_weight=1.0 \
-                trainer.max_epochs=50 \
+                trainer.max_epochs={params.max_epochs} \
                 trainer.check_val_every_n_epoch=1 \
                 trainer.val_check_interval=1.0 \
                 trainer.limit_val_batches=1.0 \
@@ -2587,7 +2629,7 @@ rule train_design_tracks:
                 trainer.gradient_clip_val=1.0 \
                 trainer.enable_progress_bar=false \
                 callbacks=encode_cocoa \
-                callbacks.early_stopping.patience=15 \
+                callbacks.early_stopping.patience={params.patience} \
                 callbacks.reconstruction_monitor.log_every_n_epochs=5 \
                 +callbacks.reconstruction_monitor.max_batches=100 \
                 datamodule.transforms.preprocess.cst_fn.filename={params.cst_fn} \
@@ -2659,7 +2701,9 @@ rule train_design_topos:
         num_quantizers = _design_param(design_topos, "nq"),
         cst_fn = _design_param(design_topos, "cst_fn"),
         extra = _design_param(design_topos, "extra"),
-        slurm = DESIGN_SLURM,
+        max_epochs = _design_param(design_topos, "max_epochs"),
+        patience = _design_param(design_topos, "patience"),
+        slurm = _design_param(design_topos, "slurm"),
     wildcard_constraints:
         design_project = "|".join(sorted({c["project"] for c in design_topos.values()})),
         design_name = "|".join(design_topos),
@@ -2689,7 +2733,7 @@ rule train_design_topos:
                 model.learning_rate=0.001 \
                 model.optimizer.lr=0.001 \
                 +model.commitment_weight=1.0 \
-                trainer.max_epochs=50 \
+                trainer.max_epochs={params.max_epochs} \
                 trainer.check_val_every_n_epoch=1 \
                 trainer.val_check_interval=1.0 \
                 trainer.limit_val_batches=1.0 \
@@ -2697,7 +2741,7 @@ rule train_design_topos:
                 trainer.gradient_clip_val=1.0 \
                 trainer.enable_progress_bar=false \
                 callbacks=encode_cocoa \
-                callbacks.early_stopping.patience=15 \
+                callbacks.early_stopping.patience={params.patience} \
                 callbacks.reconstruction_monitor.log_every_n_epochs=5 \
                 +callbacks.reconstruction_monitor.max_batches=100 \
                 datamodule.transforms.preprocess.cst_fn.filename={params.cst_fn} \
@@ -2824,7 +2868,7 @@ rule test_nofp_jetset:
         num_quantizers = _nofp_param(nofp_jetset, "nq"),
         cst_fn = _nofp_param(nofp_jetset, "cst_fn"),
         test_extra = _nofp_param(nofp_jetset, "test_extra"),
-        slurm = DESIGN_SLURM,
+        slurm = _nofp_param(nofp_jetset, "test_slurm"),
     wildcard_constraints:
         **_nofp_constraints(nofp_jetset),
     shell:
@@ -2874,7 +2918,7 @@ rule test_nofp_tracks:
         num_quantizers = _nofp_param(nofp_tracks, "nq"),
         cst_fn = _nofp_param(nofp_tracks, "cst_fn"),
         test_extra = _nofp_param(nofp_tracks, "test_extra"),
-        slurm = DESIGN_SLURM,
+        slurm = _nofp_param(nofp_tracks, "test_slurm"),
     wildcard_constraints:
         **_nofp_constraints(nofp_tracks),
     shell:
@@ -2926,7 +2970,7 @@ rule test_nofp_topos:
         cst_fn = _nofp_param(nofp_topos, "cst_fn"),
         test_extra = _nofp_param(nofp_topos, "test_extra"),
         recon_idx = _nofp_param(nofp_topos, "recon_idx"),
-        slurm = DESIGN_SLURM,
+        slurm = _nofp_param(nofp_topos, "test_slurm"),
     wildcard_constraints:
         **_nofp_constraints(nofp_topos),
     shell:
@@ -2965,3 +3009,16 @@ rule test_nofp_topos:
                 {params.test_extra} \
                 {NOFP_OVERRIDES}"
         """
+
+# ── 100-epoch d = 8 runs for the design figure: training, then the fast-path-off test ──
+localrules: all_design_e100, all_design_e100_nofp
+
+rule all_design_e100:
+    input:
+        _design_targets(design_tracks, cocoa_output_dir, "SUCCESS.txt", ["e100"]),
+        _design_targets(design_topos, cocoa_output_dir, "SUCCESS.txt", ["e100"]),
+
+rule all_design_e100_nofp:
+    input:
+        _design_targets(design_tracks, cocoa_output_dir, NOFP_MARKER, ["e100"]),
+        _design_targets(design_topos, cocoa_output_dir, NOFP_MARKER, ["e100"]),
