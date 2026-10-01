@@ -77,9 +77,8 @@ shared between train and val/test (on S3DF one 24M sample overlapped the val/tes
 
 ```bash
 cd $WORK
-git clone -b feature/cocoa-dataloader git@github.com:treasure-slac/heptokens.git   # or Treasure-AmSC/heptokens
+git clone -b feature/cocoa-dataloader git@github.com:Treasure-AmSC/heptokens.git
 git clone git@github.com:FM-for-HEP/hep-any2any.git                                # main (checked at d5aac9b)
-git clone -b heptokens-tokenizer-adapter git@github.com:FM-for-HEP/HEP4M.git       # only for hep4m/models/heptokens_adapter.py
 ```
 
 - **heptokens** (tokenizers, COCOA datasets, token export, truthpart decoding): `cd $HEPTOKENS && pixi install`.
@@ -250,8 +249,9 @@ always calls it inline (truth side from the store, reco side from the generated 
   truthpart `LitVqVae` + inverse scaler, writes a `pflow_report`-compatible ROOT). That script
   currently reads `truthpart_reco_token_logits` and argmaxes them, and assumes reco and truth have the
   same count. Add a path that reads `truthpart_reco_tokens` directly with its own cardinality.
-- **In-process:** port `HEP4M/hep4m/models/heptokens_adapter.py` (branch `heptokens-tokenizer-adapter`)
-  into hep-any2any so a modality dict entry `vae_type: heptokens` works. Because of the
+- **In-process (optional, not needed for the offline route):** port the heptokens tokenizer adapter
+  (on S3DF: `/sdf/data/atlas/u/jkrupa/heptokens/HEP4M/hep4m/models/heptokens_adapter.py`; copy it over
+  if you go this way) into hep-any2any so a modality dict entry `vae_type: heptokens` works. Because of the
   vector-quantize-pytorch version clash, the heptokens decode has to run in a separate process/env.
 
 ### 7b. Generate
