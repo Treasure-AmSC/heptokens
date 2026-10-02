@@ -17,6 +17,7 @@ dependencies = [
     "awkward>=2.8",
     "uproot>=5.7",
     "rich>=14",
+    "wandb>=0.22.3,<0.23",
 ]
 
 [project.scripts]
