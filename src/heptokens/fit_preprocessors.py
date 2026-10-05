@@ -8,6 +8,7 @@ import joblib
 import numpy as np
 from omegaconf import DictConfig, OmegaConf, open_dict
 
+from heptokens.cli_utils import with_help
 from heptokens.data.transforms import create_preprocessing_transformer
 
 log = logging.getLogger(__name__)
@@ -126,6 +127,42 @@ def _write_config_snippet(output_dir: Path, saved_files: dict[str, str]) -> None
     log.info(f"Saved config snippet to {snippet_path}")
 
 
+_HELP = """\
+heptokens-fit-preprocessors  — fit and save preprocessing scalers from training data
+
+Usage:
+  heptokens-fit-preprocessors datamodule=<NAME> [overrides...]
+
+Required:
+  datamodule=<NAME>           Hydra config group for the data module
+
+Common overrides:
+  output_dir=resources        Directory to write .joblib scaler files (default: resources)
+  max_batches=<N>             Limit the number of batches used for fitting (default: all)
+
+Preprocessing options (set inside your datamodule config under a 'preprocessing:' block,
+or override on the CLI with datamodule.preprocessing.<key>=<value>):
+  cst_modes=[quantile,standard]   Scaler modes for constituents
+  jet_modes=[quantile,standard]   Scaler modes for jets
+  fit_jets=false                  Whether to also fit jet-level scalers
+  n_quantiles=500                 Number of quantiles for QuantileTransformer
+  log_offset=1.0                  Offset applied before log transform
+  cst_log_feature_indices=[]      Constituent feature indices to log-transform
+  jet_log_feature_indices=[]      Jet feature indices to log-transform
+
+Outputs (written to output_dir/):
+  cst_<mode>.joblib           Fitted constituent scaler
+  jet_<mode>.joblib           Fitted jet scaler (if fit_jets=true)
+  preprocessor_config.yaml    Config snippet with resolved paths
+
+Hydra options:
+  --cfg job                   Print the composed config without running
+  --info                      Print Hydra search-path and config sources
+  --hydra-help                Hydra's own help
+"""
+
+
+@with_help(_HELP)
 @hydra.main(
     version_base=None,
     config_path="pkg://heptokens.conf",

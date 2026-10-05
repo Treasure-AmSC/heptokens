@@ -9,6 +9,7 @@ import lightning.pytorch as pl
 import torch as T
 from omegaconf import DictConfig
 
+from heptokens.cli_utils import with_help
 from heptokens.utils.hydra import (
     instantiate_collection,
     log_hyperparameters,
@@ -94,6 +95,35 @@ def train(cfg: DictConfig) -> None:
             save_declaration()
 
 
+_HELP = """\
+heptokens-train  — train a VQ-VAE model
+
+Usage:
+  heptokens-train datamodule=<NAME> [overrides...]
+
+Required:
+  datamodule=<NAME>           Hydra config group for the data module
+                              (place your config in conf/datamodule/<NAME>.yaml)
+
+Common overrides:
+  output_dir=./results        Root directory for outputs
+  project_name=my_project     W&B project name
+  network_name=run            Run/experiment name
+  seed=42                     Global random seed
+  trainer.max_epochs=100      Number of training epochs
+  trainer.devices=1           Number of GPUs
+  ckpt_path=<path>            Resume training from checkpoint
+  model=<NAME>                Model config (default: vqvae)
+  callbacks=<NAME>            Callbacks config (default: pretrain)
+
+Hydra options:
+  --cfg job                   Print the composed config without running
+  --info                      Print Hydra search-path and config sources
+  --hydra-help                Hydra's own help
+"""
+
+
+@with_help(_HELP)
 @hydra.main(version_base=None, config_path="pkg://heptokens.conf", config_name="train.yaml")
 def main(cfg: DictConfig) -> None:
     train(cfg)

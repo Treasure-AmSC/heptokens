@@ -1,6 +1,6 @@
 [project]
 name = "heptokens"
-version = "0.1.2"
+version = "0.1.3"
 authors = [{ name = "Samuel Klein"}, { name = "Jeffrey Krupa" }, {name = "Michael Kagan"}]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
