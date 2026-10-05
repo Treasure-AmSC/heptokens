@@ -33,3 +33,4 @@ share/python-wheels/
 # Plots and other results
 plot/
 results/
+output/

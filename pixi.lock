@@ -4564,6 +4564,7 @@ packages:
   - awkward>=2.8
   - uproot>=5.7
   - rich>=14
+  - wandb>=0.22.3,<0.23
   requires_python: '>=3.11'
 - pypi: https://files.pythonhosted.org/packages/74/03/d426348a5f13514182c1d1afab2285ec25a94bacc8d2f8d2cc627496754a/uproot-5.7.4-py3-none-any.whl
   name: uproot

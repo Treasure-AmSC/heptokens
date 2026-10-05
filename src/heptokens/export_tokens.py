@@ -30,6 +30,7 @@ import torch
 from lightning.pytorch.callbacks import BasePredictionWriter
 from omegaconf import DictConfig
 
+from heptokens.cli_utils import with_help
 from heptokens.models.vq_vae import LitVqVae
 
 log = logging.getLogger(__name__)
@@ -236,6 +237,38 @@ def export(cfg: DictConfig) -> None:
         log.info(f"Saved {out_path}: {out_path.stat().st_size / 1e9:.2f} GB")
 
 
+_HELP = """\
+heptokens-export  — export VQ-VAE token indices for a dataset
+
+Usage:
+  heptokens-export datamodule=<NAME> ckpt_path=<PATH> output_dir=<DIR> [overrides...]
+
+Required:
+  datamodule=<NAME>           Hydra config group for the data module
+  ckpt_path=<PATH>            Path to a trained VQ-VAE checkpoint (.ckpt)
+  output_dir=<DIR>            Directory to write the output .npz file
+
+Common overrides:
+  datamodule.data_path=<PATH> Path to the input HDF5 file
+  datamodule.batch_size=2048  Batch size for inference
+  trainer.devices=1           Number of GPUs
+  pos_tokenizer=<NAME>        Optional position tokenizer config (disabled by default)
+
+Output (.npz keys):
+  indices      [N, num_elements, num_quantizers]  int16  (-1 = masked)
+  labels       [N]                                int8
+  codebooks    [num_quantizers, codebook_size, dim]  float32
+  eventNumber  [N]  int64  (if present in dataset)
+  pos_tokens   [N, num_elements, num_pos_features]  int16  (if pos_tokenizer set)
+
+Hydra options:
+  --cfg job                   Print the composed config without running
+  --info                      Print Hydra search-path and config sources
+  --hydra-help                Hydra's own help
+"""
+
+
+@with_help(_HELP)
 @hydra.main(version_base=None, config_path="pkg://heptokens.conf", config_name="tokenize.yaml")
 def main(cfg: DictConfig) -> None:
     export(cfg)
