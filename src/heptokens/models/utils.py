@@ -18,7 +18,8 @@ class ScheduledOptimiserMixin:
     ``functools.partial`` objects (typically via Hydra ``_partial_: true``).
     If no optimizer partial is provided, falls back to Adam with
     ``self.learning_rate``.  If no scheduler partial is provided, no
-    scheduler is used.
+    scheduler is used. The scheduler is stepped per epoch unless the
+    ``scheduler_interval`` hyperparameter is set to ``"step"``.
     """
 
     def configure_optimizers(self):
@@ -38,7 +39,10 @@ class ScheduledOptimiserMixin:
             sched = sched_partial(optimizer=opt, model=self)
             return {
                 "optimizer": opt,
-                "lr_scheduler": {"scheduler": sched, "interval": "epoch"},
+                "lr_scheduler": {
+                    "scheduler": sched,
+                    "interval": hp.get("scheduler_interval", "epoch"),
+                },
             }
 
         return opt
