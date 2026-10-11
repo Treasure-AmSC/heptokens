@@ -60,7 +60,13 @@ class BaseMapModule(LightningDataModule, ABC):
     def get_n_classes(self) -> int | None:
         return self.n_classes
 
-    def _get_dataloader(self, dataset: Dataset, shuffle: bool, drop_last: bool) -> DataLoader:
+    def _get_dataloader(
+        self,
+        dataset: Dataset,
+        drop_last: bool,
+        shuffle: bool = False,
+        sampler=None,
+    ) -> DataLoader:
         collate_fn = None
         if self.transforms is not None:
             collate_fn = partial(collate_and_transform, transforms=self.transforms)
@@ -76,7 +82,8 @@ class BaseMapModule(LightningDataModule, ABC):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            shuffle=shuffle,
+            shuffle=shuffle if sampler is None else False,
+            sampler=sampler,
             drop_last=drop_last,
             collate_fn=collate_fn,
             **dataloader_kwargs,
