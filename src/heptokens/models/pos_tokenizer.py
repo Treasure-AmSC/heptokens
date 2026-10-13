@@ -11,8 +11,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-# (eta, cos phi, sin phi)
-_DEFAULT_RANGES = [(-3.0, 3.0), (-1.0, 1.0), (-1.0, 1.0)]
 _DEFAULT_N_BINS = 1024
 
 
@@ -27,12 +25,10 @@ class PositionTokenizer(nn.Module):
 
     def __init__(
         self,
-        ranges: list[tuple[float, float]] | None = None,
+        ranges: list[tuple[float, float]],
         n_bins: int | list[int] = _DEFAULT_N_BINS,
     ) -> None:
         super().__init__()
-        if ranges is None:
-            ranges = list(_DEFAULT_RANGES)
         n_features = len(ranges)
 
         if isinstance(n_bins, int):

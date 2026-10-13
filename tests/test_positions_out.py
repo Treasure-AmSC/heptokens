@@ -26,7 +26,7 @@ def test_tokenizer_bins_clamps_and_decodes():
 
 
 def test_tokenizer_roundtrip_within_half_bin():
-    tok = PositionTokenizer()
+    tok = PositionTokenizer(ranges=[(-3.0, 3.0), (-1.0, 1.0), (-1.0, 1.0)])
     x = torch.stack(
         [
             torch.empty(1000).uniform_(-3, 3),
@@ -42,7 +42,7 @@ def test_tokenizer_rejects_wrong_shapes():
     with pytest.raises(ValueError):
         PositionTokenizer(ranges=[(0, 1), (0, 1)], n_bins=[4])
     with pytest.raises(ValueError):
-        PositionTokenizer()(torch.zeros(5, 2))
+        PositionTokenizer(ranges=[(0, 1), (0, 1), (0, 1)])(torch.zeros(5, 2))
 
 
 def test_phi_to_cossin():
