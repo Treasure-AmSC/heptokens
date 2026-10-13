@@ -1,5 +1,6 @@
 """Flexible preprocessing transforms for jet constituents and jet-level features."""
 
+import copy
 from typing import Literal
 
 import numpy as np
@@ -219,3 +220,40 @@ def create_preprocessing_transformer(
 
     else:
         raise ValueError(f"Unknown mode: {mode}")
+
+
+def slice_transformer(transformer: CompositeTransformer, keep: list[int]) -> CompositeTransformer:
+    """Restrict a fitted log+standard ``CompositeTransformer`` to the feature columns ``keep``.
+
+    Every column is transformed independently, so the sliced transformer applies exactly
+    the same transform to the kept columns as the full one. Used for positions-out, where
+    position columns are removed from ``csts`` but the positions-in scaler is reused.
+    """
+    if not isinstance(transformer, CompositeTransformer) or not isinstance(
+        transformer.final_transformer, StandardScaler
+    ):
+        raise TypeError(
+            f"only CompositeTransformer(..., StandardScaler) supported, got {transformer}"
+        )
+    new_index = {old: new for new, old in enumerate(keep)}
+
+    configs = []
+    for cfg in transformer.log_transformer.feature_configs:
+        idx = [cfg["indices"]] if isinstance(cfg["indices"], int) else list(cfg["indices"])
+        kept = [new_index[i] for i in idx if i in new_index]
+        if kept:
+            configs.append({"indices": kept, "transformers": copy.deepcopy(cfg["transformers"])})
+    log_t = FeatureWiseTransformer(configs)
+    log_t.n_features_in_ = len(keep)
+
+    final = copy.deepcopy(transformer.final_transformer)
+    for attr in ("mean_", "scale_", "var_"):
+        if getattr(final, attr, None) is not None:
+            setattr(final, attr, np.asarray(getattr(final, attr))[keep])
+    if np.ndim(final.n_samples_seen_) > 0:
+        final.n_samples_seen_ = np.asarray(final.n_samples_seen_)[keep]
+    final.n_features_in_ = len(keep)
+
+    out = CompositeTransformer(log_t, final)
+    out.n_features_in_ = len(keep)
+    return out
