@@ -96,6 +96,21 @@ class CoderModel(nn.Module):
 
 
 class Coder(nn.Module):
+    """Wraps an inner model (e.g. ``CoderModel``, ``Transformer``) that maps batch tensors.
+
+    Args:
+        input_dim: Input feature dimension of the inner model.
+        output_dim: Output feature dimension of the inner model.
+        model: Inner model class, called as ``model(input_dim=..., output_dim=...)``.
+        input_key: Batch key of the input tensor.
+        mask_key: Batch key of the boolean validity mask.
+        positions_key: Optional batch key of a per-token coordinates tensor (e.g.
+            ``[eta, cos_phi, sin_phi]``). If set, it is passed to the inner model as
+            ``positions=...`` for positional encoding (see ``Transformer(pos_dim=...)``).
+            ``None`` (default) passes nothing.
+        data_sample: Accepted for callers that pass it (e.g. ``LitVqVae``); unused.
+    """
+
     def __init__(
         self,
         input_dim: int,
@@ -107,16 +122,9 @@ class Coder(nn.Module):
         data_sample=None,
     ):
         super(Coder, self).__init__()
-        # Build coder (encoder/decoder). data_sample is accepted for
-        # callers that pass it (e.g. LitVqVae)
         self.coder = model(input_dim=input_dim, output_dim=output_dim)
         self.input_key = input_key
         self.mask_key = mask_key
-        # Optional key for a per-token spatial coordinates tensor (e.g.
-        # [eta, cos_phi, sin_phi]), forwarded to the inner model as
-        # `positions=...` for architectures that support positional encoding
-        # (e.g. Transformer). None by default -- no behavior change unless a
-        # config explicitly sets this.
         self.positions_key = positions_key
 
 

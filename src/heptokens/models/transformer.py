@@ -11,6 +11,12 @@ class Transformer(nn.Module):
 
     This module preserves the input sequence length and supports a padding mask.
     It is designed to be used inside Encoder/Decoder wrappers.
+
+    Args:
+        pos_dim: If set, adds a learned positional encoding: a ``positions`` tensor of
+            shape ``[batch, n_csts, pos_dim]`` passed to ``forward`` (e.g. per-token
+            ``[eta, cos_phi, sin_phi]``) is linearly projected to ``d_model`` and added to
+            the input embedding. ``None`` (default) disables it.
     """
 
     def __init__(
@@ -28,8 +34,6 @@ class Transformer(nn.Module):
     ) -> None:
         super().__init__()
         self.input_proj = nn.Linear(input_dim, d_model)
-        # Optional positional encoding: projects per-token spatial coordinates
-        # (e.g. [eta, cos_phi, sin_phi]) to d_model 
         self.pos_proj = nn.Linear(pos_dim, d_model) if pos_dim is not None else None
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -103,7 +107,20 @@ class Transformer(nn.Module):
 
 
 class SetToVectorTransformer(nn.Module):
-    """Maps a set (variable-length sequence) to a single vector."""
+    """Maps a set (variable-length sequence) to a single vector.
+
+    Args:
+        pooling: How the per-token outputs are reduced to one vector:
+
+            - ``"mean"``: mean over valid tokens.
+            - ``"sum"``: sum over valid tokens, followed by a LayerNorm. Not normalized by
+              the number of tokens, so suited to targets that scale with the sum over
+              constituents (e.g. jet pT).
+            - ``"max"``: element-wise max over valid tokens.
+            - ``"cls"``: output at a learned CLS token prepended to the sequence.
+
+            Masked (invalid) tokens never contribute.
+    """
 
     def __init__(
         self,
@@ -116,7 +133,7 @@ class SetToVectorTransformer(nn.Module):
         dim_feedforward: int = 512,
         dropout: float = 0.0,
         activation: str = "gelu",
-        pooling: str = "mean",  # "mean", "sum", "max", or "cls"
+        pooling: str = "mean",
     ) -> None:
         super().__init__()
         self.pooling = pooling
@@ -168,10 +185,6 @@ class SetToVectorTransformer(nn.Module):
             else:
                 pooled = seq_out.mean(dim=1)
         elif self.pooling == "sum":
-            # Unlike "mean", does NOT normalize by constituent count -- the
-            # physically-correct aggregation for quantities (e.g. jet pT)
-            # that scale with the SUM of constituent momenta, not their
-            # average. Masked (invalid) positions contribute exactly zero.
             if mask is not None:
                 pooled = (seq_out * mask.unsqueeze(-1)).sum(dim=1)
             else:
