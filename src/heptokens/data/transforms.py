@@ -3,6 +3,7 @@
 import copy
 from typing import Literal
 
+import joblib
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import QuantileTransformer, StandardScaler
@@ -222,12 +223,15 @@ def create_preprocessing_transformer(
         raise ValueError(f"Unknown mode: {mode}")
 
 
-def slice_transformer(transformer: CompositeTransformer, keep: list[int]) -> CompositeTransformer:
-    """Restrict a fitted log+standard ``CompositeTransformer`` to the feature columns ``keep``.
+def select_features(
+    transformer: CompositeTransformer, fitted_features: list[str], features: list[str]
+) -> CompositeTransformer:
+    """Restrict a fitted log+standard ``CompositeTransformer`` to the columns ``features``, by name.
 
-    Every column is transformed independently, so the sliced transformer applies exactly
-    the same transform to the kept columns as the full one. Used for positions-out, where
-    position columns are removed from ``csts`` but the positions-in scaler is reused.
+    ``fitted_features`` names the transformer's columns in the order it was fitted on. The
+    result transforms ``features`` (in that order) exactly as the full transformer does,
+    since every column is transformed independently. Used for positions-out, where position
+    columns are removed from ``csts`` but the positions-in scaler is reused.
     """
     if not isinstance(transformer, CompositeTransformer) or not isinstance(
         transformer.final_transformer, StandardScaler
@@ -235,6 +239,23 @@ def slice_transformer(transformer: CompositeTransformer, keep: list[int]) -> Com
         raise TypeError(
             f"only CompositeTransformer(..., StandardScaler) supported, got {transformer}"
         )
+    fitted_features, features = list(fitted_features), list(features)
+    if len(fitted_features) != transformer.n_features_in_:
+        raise ValueError(
+            f"fitted_features has {len(fitted_features)} names but the transformer was fitted on "
+            f"{transformer.n_features_in_} columns: {fitted_features}"
+        )
+    for name, names in (("fitted_features", fitted_features), ("features", features)):
+        if len(set(names)) != len(names):
+            raise ValueError(f"{name} contains duplicates: {names}")
+    missing = [f for f in features if f not in fitted_features]
+    if missing:
+        raise ValueError(f"features {missing} are not among fitted_features {fitted_features}")
+    for cfg in transformer.log_transformer.feature_configs:
+        # Copied as-is, so only stateless element-wise transforms are safe to slice.
+        if not all(type(t) is LogScaleTransform for t in cfg["transformers"]):
+            raise TypeError(f"cannot slice log-stage transformers {cfg['transformers']}")
+    keep = [fitted_features.index(f) for f in features]
     new_index = {old: new for new, old in enumerate(keep)}
 
     configs = []
@@ -257,3 +278,38 @@ def slice_transformer(transformer: CompositeTransformer, keep: list[int]) -> Com
     out = CompositeTransformer(log_t, final)
     out.n_features_in_ = len(keep)
     return out
+
+
+def load_transformer(
+    filename: str,
+    features: list[str] | None = None,
+    fitted_features: list[str] | None = None,
+) -> BaseEstimator:
+    """Load a fitted transformer (joblib) for data whose columns are ``features``.
+
+    Meant to be used from configs, with ``features`` interpolated from the datamodule:
+
+    - ``fitted_features`` given: it must name every fitted column; the transformer is
+      restricted to ``features`` by name (see ``select_features``) if they differ.
+    - ``fitted_features`` omitted: the column counts must match exactly.
+
+    Raises instead of silently mis-scaling when the data and transformer columns disagree.
+    """
+    transformer = joblib.load(filename)
+    n_fitted = transformer.n_features_in_
+    if fitted_features is None:
+        if features is not None and len(features) != n_fitted:
+            raise ValueError(
+                f"{filename} was fitted on {n_fitted} columns but the data has "
+                f"{len(features)} features {list(features)}; set fitted_features to select "
+                "columns by name"
+            )
+        return transformer
+    if features is None or list(features) == list(fitted_features):
+        if len(fitted_features) != n_fitted:
+            raise ValueError(
+                f"fitted_features has {len(fitted_features)} names but {filename} was fitted on "
+                f"{n_fitted} columns"
+            )
+        return transformer
+    return select_features(transformer, fitted_features, features)

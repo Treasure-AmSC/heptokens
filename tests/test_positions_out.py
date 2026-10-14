@@ -1,18 +1,25 @@
-"""Positions-out building blocks: PositionTokenizer, phi_to_cossin, slice_transformer and
-``position_features`` in the structured-array datasets."""
+"""Positions-out building blocks: PositionTokenizer, phi_to_cossin, name-based transformer
+selection and ``position_features`` in the structured-array datasets."""
 
 import h5py
+import joblib
 import numpy as np
 import pytest
 import torch
-from sklearn.preprocessing import QuantileTransformer
+from sklearn.preprocessing import QuantileTransformer, StandardScaler
 
 from heptokens.data.positions import phi_to_cossin
 from heptokens.data.structured_array import (
     StructuredArrayHDF5Dataset,
     StructuredArrayIterableDataset,
 )
-from heptokens.data.transforms import create_preprocessing_transformer, slice_transformer
+from heptokens.data.transforms import (
+    CompositeTransformer,
+    FeatureWiseTransformer,
+    create_preprocessing_transformer,
+    load_transformer,
+    select_features,
+)
 from heptokens.models.pos_tokenizer import PositionTokenizer
 
 
@@ -56,15 +63,23 @@ def test_phi_to_cossin():
     assert np.array_equal(phi_to_cossin(pos[..., ::-1], phi_index=0)[0, 0], [cos, sin, 0.5])
 
 
-def test_slice_transformer_matches_full_on_kept_columns():
+FITTED = ["pt", "eta", "phi", "d0", "z0"]
+
+
+def _fitted_scaler():
     rng = np.random.default_rng(0)
     x = rng.lognormal(size=(500, 5)).astype(np.float32)
     full = create_preprocessing_transformer(
         "log_standard", log_feature_indices=[0, 3], n_features=5
     )
-    full.fit(x)
-    keep = [0, 3, 4]
-    sliced = slice_transformer(full, keep)
+    return full.fit(x), x
+
+
+def test_select_features_matches_full_on_kept_columns():
+    full, x = _fitted_scaler()
+    features = ["z0", "pt", "d0"]  # reordered on purpose
+    keep = [FITTED.index(f) for f in features]
+    sliced = select_features(full, FITTED, features)
     assert sliced.n_features_in_ == 3
     assert np.allclose(sliced.transform(x[:, keep]), full.transform(x)[:, keep], rtol=0, atol=1e-6)
     z = full.transform(x)
@@ -73,9 +88,48 @@ def test_slice_transformer_matches_full_on_kept_columns():
     )
 
 
-def test_slice_transformer_rejects_quantile():
+@pytest.mark.parametrize(
+    "fitted, features, match",
+    [
+        (FITTED[:4], ["pt"], "fitted on 5 columns"),
+        (FITTED, ["pt", "theta"], "not among fitted_features"),
+        (FITTED, ["pt", "pt"], "duplicates"),
+        (["pt", "pt", "phi", "d0", "z0"], ["pt"], "duplicates"),
+    ],
+)
+def test_select_features_rejects_bad_names(fitted, features, match):
+    full, _ = _fitted_scaler()
+    with pytest.raises(ValueError, match=match):
+        select_features(full, fitted, features)
+
+
+def test_select_features_rejects_unsupported_transformers():
     with pytest.raises(TypeError):
-        slice_transformer(QuantileTransformer(), [0])
+        select_features(QuantileTransformer(), ["a"], ["a"])
+    stateful = CompositeTransformer(
+        FeatureWiseTransformer([{"indices": [0], "transformers": [StandardScaler()]}]),
+        StandardScaler(),
+    ).fit(np.random.default_rng(0).normal(size=(50, 2)))
+    with pytest.raises(TypeError, match="cannot slice"):
+        select_features(stateful, ["a", "b"], ["b"])
+
+
+def test_load_transformer(tmp_path):
+    full, x = _fitted_scaler()
+    path = tmp_path / "scaler.joblib"
+    joblib.dump(full, path)
+    assert load_transformer(str(path)).n_features_in_ == 5
+    assert load_transformer(str(path), features=FITTED).n_features_in_ == 5
+    assert load_transformer(str(path), FITTED, fitted_features=FITTED).n_features_in_ == 5
+    sliced = load_transformer(str(path), ["pt", "d0"], fitted_features=FITTED)
+    assert np.array_equal(
+        sliced.transform(x[:, [0, 3]]),
+        select_features(full, FITTED, ["pt", "d0"]).transform(x[:, [0, 3]]),
+    )
+    with pytest.raises(ValueError, match="set fitted_features"):
+        load_transformer(str(path), features=["pt", "d0", "z0"])
+    with pytest.raises(ValueError, match="fitted on 5 columns"):
+        load_transformer(str(path), features=FITTED[:4], fitted_features=FITTED[:4])
 
 
 def _compound_file(group_path, tmp_path):
