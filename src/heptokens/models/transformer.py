@@ -11,6 +11,12 @@ class Transformer(nn.Module):
 
     This module preserves the input sequence length and supports a padding mask.
     It is designed to be used inside Encoder/Decoder wrappers.
+
+    Args:
+        pos_dim: If set, adds a learned positional encoding: a ``positions`` tensor of
+            shape ``[batch, n_csts, pos_dim]`` passed to ``forward`` (e.g. per-token
+            ``[eta, cos_phi, sin_phi]``) is linearly projected to ``d_model`` and added to
+            the input embedding. ``None`` (default) disables it.
     """
 
     def __init__(
@@ -24,9 +30,11 @@ class Transformer(nn.Module):
         dim_feedforward: int = 512,
         dropout: float = 0.0,
         activation: str = "gelu",
+        pos_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.input_proj = nn.Linear(input_dim, d_model)
+        self.pos_proj = nn.Linear(pos_dim, d_model) if pos_dim is not None else None
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
@@ -38,12 +46,20 @@ class Transformer(nn.Module):
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
         self.output_proj = nn.Linear(d_model, output_dim)
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Forward pass through the transformer.
 
         Args:
             x: Tensor of shape [batch, n_csts, input_dim].
             mask: Boolean tensor of shape [batch, n_csts] where True means valid.
+            positions: Optional tensor of shape [batch, n_csts, pos_dim] with
+                each token's spatial coordinates. Only used if this module was
+                built with ``pos_dim`` set; ignored otherwise.
 
         Returns:
             Tensor of shape [batch, n_csts, output_dim].
@@ -52,6 +68,8 @@ class Transformer(nn.Module):
         if x.dim() == 2:
             x = x.unsqueeze(0)
             squeeze_batch = True
+            if positions is not None:
+                positions = positions.unsqueeze(0)
 
         key_padding_mask = None
         empty_sequences = None
@@ -72,6 +90,8 @@ class Transformer(nn.Module):
             else:
                 key_padding_mask = ~mask
         x = self.input_proj(x)
+        if self.pos_proj is not None and positions is not None:
+            x = x + self.pos_proj(positions)
         x = self.encoder(x, src_key_padding_mask=key_padding_mask)
         x = self.output_proj(x)
 
@@ -87,7 +107,20 @@ class Transformer(nn.Module):
 
 
 class SetToVectorTransformer(nn.Module):
-    """Maps a set (variable-length sequence) to a single vector."""
+    """Maps a set (variable-length sequence) to a single vector.
+
+    Args:
+        pooling: How the per-token outputs are reduced to one vector:
+
+            - ``"mean"``: mean over valid tokens.
+            - ``"sum"``: sum over valid tokens, followed by a LayerNorm. Not normalized by
+              the number of tokens, so suited to targets that scale with the sum over
+              constituents (e.g. jet pT).
+            - ``"max"``: element-wise max over valid tokens.
+            - ``"cls"``: output at a learned CLS token prepended to the sequence.
+
+            Masked (invalid) tokens never contribute.
+    """
 
     def __init__(
         self,
@@ -100,7 +133,7 @@ class SetToVectorTransformer(nn.Module):
         dim_feedforward: int = 512,
         dropout: float = 0.0,
         activation: str = "gelu",
-        pooling: str = "mean",  # "mean", "max", or "cls"
+        pooling: str = "mean",
     ) -> None:
         super().__init__()
         self.pooling = pooling
@@ -117,10 +150,11 @@ class SetToVectorTransformer(nn.Module):
             activation=activation,
         )
         self.output_proj = nn.Linear(d_model, output_dim)
-        if pooling not in ["mean", "max", "cls"]:
+        if pooling not in ["mean", "sum", "max", "cls"]:
             raise ValueError(f"Unknown pooling method: {pooling}")
         if pooling == "cls":
             self.cls_token = nn.Parameter(torch.zeros(1, 1, input_dim))
+        self.pool_norm = nn.LayerNorm(d_model) if pooling == "sum" else None
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         """Forward pass.
@@ -150,6 +184,12 @@ class SetToVectorTransformer(nn.Module):
                 pooled = valid_sum / valid_count.clamp(min=1)
             else:
                 pooled = seq_out.mean(dim=1)
+        elif self.pooling == "sum":
+            if mask is not None:
+                pooled = (seq_out * mask.unsqueeze(-1)).sum(dim=1)
+            else:
+                pooled = seq_out.sum(dim=1)
+            pooled = self.pool_norm(pooled)
         elif self.pooling == "max":
             if mask is not None:
                 seq_out_masked = seq_out.masked_fill(~mask.unsqueeze(-1), float("-inf"))
