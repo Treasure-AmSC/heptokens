@@ -32,6 +32,7 @@ from omegaconf import DictConfig
 
 from heptokens.cli_utils import with_help
 from heptokens.models.vq_vae import LitVqVae
+from heptokens.traced_modules import save_inference_modules
 
 log = logging.getLogger(__name__)
 
@@ -235,6 +236,12 @@ def export(cfg: DictConfig) -> None:
         log.info(f"Saving compressed {out_path} ...")
         np.savez_compressed(out_path, **save_dict)
         log.info(f"Saved {out_path}: {out_path.stat().st_size / 1e9:.2f} GB")
+
+        try:
+            modules_dir = save_inference_modules(model, output_dir)
+            log.info(f"Saved inference modules to {modules_dir}")
+        except NotImplementedError as e:
+            log.warning(f"Skipping traced module export: {e}")
 
 
 _HELP = """\
