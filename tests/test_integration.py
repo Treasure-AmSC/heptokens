@@ -4,9 +4,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 from omegaconf import OmegaConf
 
 from heptokens.export_tokens import export
+from heptokens.traced_modules import VqVaeKit
 from heptokens.train import train
 
 
@@ -149,3 +151,30 @@ def test_train_then_export(train_cfg, hdf5_file, tmp_path):
     assert data["indices"].ndim == 3
     assert data["indices"].shape[2] == 2  # num_quantizers
     assert data["codebooks"].shape == (2, 8, 4)  # [num_quantizers, codebook_size, codebook_dim]
+
+    # Inference modules
+    modules_dir = export_dir / "modules"
+    assert modules_dir.is_dir(), "modules/ directory not created"
+    for fname in ("encoder.pt", "decoder.pt", "codebook_lookup.pt", "index_encoder.pt"):
+        assert (modules_dir / fname).exists(), f"{fname} not found in modules/"
+
+    # Round-trip via VqVaeKit
+    kit = VqVaeKit.load(modules_dir)
+    B_test, T_test, D_in = 2, 20, 3
+    x = torch.randn(B_test, T_test, D_in)
+    mask = torch.ones(B_test, T_test, dtype=torch.bool)
+    mask[0, -5:] = False
+
+    z_e = kit.encode_float(x, mask)
+    assert z_e.shape == (B_test, T_test, 4)  # codebook_dim=4
+    assert torch.all(z_e[0, -5:] == 0)
+
+    indices = kit.encode_indices(x, mask)
+    assert indices.shape == (B_test, T_test, 2)  # num_quantizers=2
+    assert (indices[0, -5:] == -1).all()
+
+    z_q = kit.lookup(indices)
+    assert z_q.shape == (B_test, T_test, 4)
+
+    x_hat = kit.decode_from_indices(indices, mask)
+    assert x_hat.shape == (B_test, T_test, D_in)
