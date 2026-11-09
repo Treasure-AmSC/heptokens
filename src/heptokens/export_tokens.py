@@ -54,6 +54,14 @@ def extract_codebooks(model: LitVqVae) -> np.ndarray:
     return codebooks.detach().cpu().numpy()
 
 
+def _to_int16(tokens: torch.Tensor, name: str) -> np.ndarray:
+    """Cast token indices (-1 = masked) to the int16 export format, raising instead of wrapping."""
+    tokens = tokens.cpu().numpy()
+    if tokens.size and tokens.max() > np.iinfo(np.int16).max:
+        raise OverflowError(f"{name} index {tokens.max()} does not fit the int16 export format")
+    return tokens.astype(np.int16)
+
+
 class MemmapPredictionWriter(BasePredictionWriter):
     """Write predictions to memory-mapped files batch-by-batch to avoid OOM.
 
@@ -128,7 +136,7 @@ class MemmapPredictionWriter(BasePredictionWriter):
     def write_on_batch_end(
         self, trainer, pl_module, prediction, batch_indices, batch, batch_idx, dataloader_idx
     ):
-        indices = prediction["indices"].cpu().numpy().astype(np.int16)
+        indices = _to_int16(prediction["indices"], "token")
         labels = prediction["labels"].cpu().numpy().astype(np.int8)
         n = len(labels)
 
@@ -146,9 +154,7 @@ class MemmapPredictionWriter(BasePredictionWriter):
                 mask = batch.get(self.mask_key)
                 if mask is not None:
                     pos_idx = pos_idx.masked_fill(~mask.unsqueeze(-1).bool(), -1)
-                self.pos_tokens_mmap[self.pos : self.pos + n] = (
-                    pos_idx.cpu().numpy().astype(np.int16)
-                )
+                self.pos_tokens_mmap[self.pos : self.pos + n] = _to_int16(pos_idx, "position token")
 
         self.pos += n
 
