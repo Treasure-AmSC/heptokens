@@ -1,18 +1,22 @@
 """Latent-binning bottleneck (LatentBins) and its LitVqVae integration."""
 
 from functools import partial
+from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 from hydra import compose, initialize_config_module
 from hydra.utils import instantiate
+from omegaconf import OmegaConf
 from vector_quantize_pytorch import ResidualVQ
 
-from heptokens.export_tokens import extract_codebooks
+from heptokens.export_tokens import export, extract_codebooks
 from heptokens.models.coders import CellDecoder, Encoder
 from heptokens.models.latent_bins import LatentBins
 from heptokens.models.transformer import Transformer
 from heptokens.models.vq_vae import LitVqVae
+from heptokens.train import train
 
 
 def test_eval_latent_is_the_bin_centre():
@@ -120,3 +124,106 @@ def test_default_is_the_residual_vq():
     model.eval()
     batch = make_batch()
     assert torch.equal(model.encode_indices(batch), model.encode(batch)[1])
+
+
+def _datamodule_cfg(hdf5_file: Path, train_frac: float, val_frac: float, test_frac: float):
+    return {
+        "_target_": "heptokens.data.structured_array.StructuredArrayModule",
+        "dataset": {
+            "_target_": "heptokens.data.structured_array.StructuredArrayHDF5Dataset",
+            "_partial_": True,
+            "file_path": str(hdf5_file),
+            "obj_group": "jets",
+            "set_group": "tracks",
+            "obj_features": ["pt", "eta"],
+            "set_features": ["pt", "eta", "phi"],
+            "label_key": "label",
+            "mask_key": "valid",
+        },
+        "data_path": str(hdf5_file),  # export names its output after this file
+        "train_frac": train_frac,
+        "val_frac": val_frac,
+        "test_frac": test_frac,
+        "batch_size": 32,
+        "num_workers": 0,
+    }
+
+
+def test_checkpoint_reloads_and_exports(hdf5_file, tmp_path):
+    full_path = tmp_path / "run"
+    coder = {"_target_": "heptokens.models.coders.CoderModel", "_partial_": True}
+    train(
+        OmegaConf.create(
+            {
+                "seed": 42,
+                "precision": "medium",
+                "compile": None,
+                "full_resume": False,
+                "ckpt_path": None,
+                "weight_ckpt_path": None,
+                "full_path": str(full_path),
+                "datamodule": _datamodule_cfg(hdf5_file, 0.7, 0.15, 0.15),
+                "model": {
+                    "_target_": "heptokens.models.vq_vae.LitVqVae",
+                    "encoder": {
+                        "_target_": "heptokens.models.coders.Encoder",
+                        "_partial_": True,
+                        "model": {**coder, "hidden_dims": [32, 64]},
+                    },
+                    "decoder": {
+                        "_target_": "heptokens.models.coders.Decoder",
+                        "_partial_": True,
+                        "model": {**coder, "hidden_dims": [64, 32]},
+                    },
+                    "codebook_size": None,
+                    "num_quantizers": None,
+                    "codebook_dim": 4,
+                    "latent_bins": {"num_bins": 64, "bin_range": 4.0, "noise_std_bins": 0.29},
+                },
+                "trainer": {
+                    "_target_": "lightning.Trainer",
+                    "max_epochs": 1,
+                    "limit_train_batches": 2,
+                    "limit_val_batches": 1,
+                    "accelerator": "cpu",
+                    "enable_progress_bar": False,
+                    "default_root_dir": str(full_path),
+                },
+                "callbacks": {
+                    "checkpoint": {
+                        "_target_": "lightning.pytorch.callbacks.ModelCheckpoint",
+                        "dirpath": str(full_path / "checkpoints"),
+                        "filename": "last",
+                    },
+                },
+                "logger": {
+                    "_target_": "lightning.pytorch.loggers.CSVLogger",
+                    "save_dir": str(full_path),
+                },
+            }
+        )
+    )
+    ckpt_path = full_path / "checkpoints" / "last.ckpt"
+
+    model = LitVqVae.load_from_checkpoint(ckpt_path, map_location="cpu")
+    assert isinstance(model.vector_quantization, LatentBins)
+    assert (model.vector_quantization.dim, model.codebook_size) == (4, 64)
+
+    export(
+        OmegaConf.create(
+            {
+                "ckpt_path": str(ckpt_path),
+                "output_dir": str(tmp_path / "export"),
+                "datamodule": _datamodule_cfg(hdf5_file, 0.0, 0.0, 1.0),
+                "trainer": {
+                    "_target_": "lightning.Trainer",
+                    "accelerator": "cpu",
+                    "enable_progress_bar": False,
+                },
+            }
+        )
+    )
+    data = np.load(tmp_path / "export" / f"{hdf5_file.stem}.npz")
+    assert data["indices"].shape == (100, 20, 4)  # [jets, elements, codebook_dim]
+    assert data["indices"].min() >= -1 and data["indices"].max() < 64
+    assert np.array_equal(data["codebooks"], extract_codebooks(model))
