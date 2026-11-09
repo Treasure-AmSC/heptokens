@@ -31,15 +31,26 @@ from lightning.pytorch.callbacks import BasePredictionWriter
 from omegaconf import DictConfig
 
 from heptokens.cli_utils import with_help
+from heptokens.models.latent_bins import LatentBins
 from heptokens.models.vq_vae import LitVqVae
 
 log = logging.getLogger(__name__)
 
 
 def extract_codebooks(model: LitVqVae) -> np.ndarray:
-    """Return codebook embeddings as [num_quantizers, codebook_size, codebook_dim]."""
+    """Return codebook embeddings as [num_quantizers, codebook_size, codebook_dim].
+
+    For a LatentBins model each latent dimension is one quantizer: codebooks[q, k] holds the
+    centre of bin k on axis q and zeros elsewhere, so the module's reconstruction rule gives
+    the binned latent.
+    """
     vq = model.vector_quantization
-    codebooks = torch.stack([layer.codebook for layer in vq.layers])
+    if isinstance(vq, LatentBins):
+        centres = vq.get_output_from_indices(torch.arange(vq.num_bins))  # [num_bins]
+        axes = torch.eye(vq.dim)  # [dim, dim]
+        codebooks = axes[:, None, :] * centres[None, :, None]  # [dim, num_bins, dim]
+    else:
+        codebooks = torch.stack([layer.codebook for layer in vq.layers])
     return codebooks.detach().cpu().numpy()
 
 
@@ -165,7 +176,8 @@ def export(cfg: DictConfig) -> None:
 
     total_jets = len(datamodule.test_set)
     num_elements = getattr(datamodule.test_set, "num_elements", 40)
-    num_quantizers = model.hparams.get("num_quantizers", 4)
+    codebooks = extract_codebooks(model)
+    num_quantizers = codebooks.shape[0]
 
     # Optional, opt-in export-layer position tokenization.
     pos_tokenizer = None
@@ -209,7 +221,6 @@ def export(cfg: DictConfig) -> None:
 
         indices = np.lib.format.open_memmap(str(writer.indices_path), mode="r")[:actual_jets]
         labels = np.lib.format.open_memmap(str(writer.labels_path), mode="r")[:actual_jets]
-        codebooks = extract_codebooks(model)
 
         stem = Path(cfg.datamodule.data_path).stem
         out_path = output_dir / f"{stem}.npz"
