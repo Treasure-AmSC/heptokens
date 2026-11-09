@@ -4,6 +4,8 @@ from functools import partial
 
 import pytest
 import torch
+from hydra import compose, initialize_config_module
+from hydra.utils import instantiate
 from vector_quantize_pytorch import ResidualVQ
 
 from heptokens.export_tokens import extract_codebooks
@@ -99,6 +101,17 @@ def test_bins_reject_rvq_settings():
             num_quantizers=None,
             latent_bins=dict(num_bins=16, bin_range=4.0, noise_std_bins=0.29),
         )
+
+
+def test_transformer_latent_bins_config():
+    with initialize_config_module(config_module="heptokens.conf", version_base=None):
+        cfg = compose(config_name="model/transformer_latent_bins").model
+    model = instantiate(cfg)
+    assert isinstance(model.vector_quantization, LatentBins)
+    assert model.vector_quantization.dim == cfg.codebook_dim
+    assert model.codebook_size == 4096
+    batch = {"csts": torch.randn(2, 5, 3), "mask": torch.ones(2, 5, dtype=torch.bool)}
+    assert torch.isfinite(model.training_step(batch, 0))
 
 
 def test_default_is_the_residual_vq():
