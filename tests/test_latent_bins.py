@@ -6,6 +6,7 @@ import pytest
 import torch
 from vector_quantize_pytorch import ResidualVQ
 
+from heptokens.export_tokens import extract_codebooks
 from heptokens.models.coders import CellDecoder, Encoder
 from heptokens.models.latent_bins import LatentBins
 from heptokens.models.transformer import Transformer
@@ -73,6 +74,22 @@ def test_tokens_decode_as_the_eval_latent():
     z_tokens = model.vector_quantization.get_output_from_indices(indices.clamp(min=0))
     valid = batch["mask"]
     assert torch.equal(model.decode(z_tokens, batch)[valid], model.decode(z_q, batch)[valid])
+
+
+def test_exported_codebooks_reproduce_the_eval_latent():
+    model = make_model(
+        codebook_size=None,
+        num_quantizers=None,
+        latent_bins=dict(num_bins=64, bin_range=4.0, noise_std_bins=0.29),
+    ).eval()
+    batch = make_batch()
+    z_q, indices, _ = model.encode(batch)  # [B, P, dim] each
+    codebooks = torch.from_numpy(extract_codebooks(model))  # [dim, num_bins, dim]
+    assert codebooks.shape == (4, 64, 4)
+    valid = batch["mask"]
+    idx = indices[valid]  # [n_valid, dim]
+    z_export = sum(codebooks[q, idx[:, q]] for q in range(codebooks.shape[0]))  # [n_valid, dim]
+    assert torch.equal(z_export, z_q[valid])
 
 
 def test_bins_reject_rvq_settings():
