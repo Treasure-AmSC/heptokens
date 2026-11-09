@@ -149,7 +149,25 @@ def _datamodule_cfg(hdf5_file: Path, train_frac: float, val_frac: float, test_fr
     }
 
 
-def test_checkpoint_reloads_and_exports(hdf5_file, tmp_path):
+# quantizer settings, quantizer class, tokens per element, values per token
+QUANTIZERS = {
+    "latent_bins": (
+        {
+            "codebook_size": None,
+            "num_quantizers": None,
+            "latent_bins": {"num_bins": 64, "bin_range": 4.0, "noise_std_bins": 0.29},
+        },
+        LatentBins,
+        4,
+        64,
+    ),
+    "residual_vq": ({"codebook_size": 8, "num_quantizers": 2}, ResidualVQ, 2, 8),
+}
+
+
+@pytest.mark.parametrize("quantizer", QUANTIZERS)
+def test_checkpoint_reloads_and_exports(hdf5_file, tmp_path, quantizer):
+    settings, vq_class, n_tokens, n_values = QUANTIZERS[quantizer]
     full_path = tmp_path / "run"
     coder = {"_target_": "heptokens.models.coders.CoderModel", "_partial_": True}
     train(
@@ -175,10 +193,8 @@ def test_checkpoint_reloads_and_exports(hdf5_file, tmp_path):
                         "_partial_": True,
                         "model": {**coder, "hidden_dims": [64, 32]},
                     },
-                    "codebook_size": None,
-                    "num_quantizers": None,
                     "codebook_dim": 4,
-                    "latent_bins": {"num_bins": 64, "bin_range": 4.0, "noise_std_bins": 0.29},
+                    **settings,
                 },
                 "trainer": {
                     "_target_": "lightning.Trainer",
@@ -205,9 +221,9 @@ def test_checkpoint_reloads_and_exports(hdf5_file, tmp_path):
     )
     ckpt_path = full_path / "checkpoints" / "last.ckpt"
 
-    model = LitVqVae.load_from_checkpoint(ckpt_path, map_location="cpu")
-    assert isinstance(model.vector_quantization, LatentBins)
-    assert (model.vector_quantization.dim, model.codebook_size) == (4, 64)
+    model = LitVqVae.load_from_checkpoint(ckpt_path, map_location="cpu").eval()
+    assert isinstance(model.vector_quantization, vq_class)
+    assert model.codebook_size == n_values
 
     export(
         OmegaConf.create(
@@ -224,6 +240,18 @@ def test_checkpoint_reloads_and_exports(hdf5_file, tmp_path):
         )
     )
     data = np.load(tmp_path / "export" / f"{hdf5_file.stem}.npz")
-    assert data["indices"].shape == (100, 20, 4)  # [jets, elements, codebook_dim]
-    assert data["indices"].min() >= -1 and data["indices"].max() < 64
-    assert np.array_equal(data["codebooks"], extract_codebooks(model))
+    indices = torch.from_numpy(data["indices"]).long()  # [jets, elements, n_tokens]
+    codebooks = torch.from_numpy(data["codebooks"])  # [n_tokens, n_values, codebook_dim]
+    assert indices.shape == (100, 20, n_tokens)
+    assert codebooks.shape == (n_tokens, n_values, 4)
+
+    # The export's predict order: test set of the same split, not shuffled.
+    datamodule = instantiate(OmegaConf.create(_datamodule_cfg(hdf5_file, 0.0, 0.0, 1.0)))
+    datamodule.setup(stage="predict")
+    with torch.no_grad():
+        encoded = [model.encode(batch)[:2] for batch in datamodule.predict_dataloader()]
+    z_q = torch.cat([z for z, _ in encoded])  # [jets, elements, codebook_dim]
+    assert torch.equal(indices, torch.cat([i for _, i in encoded]))
+    valid = indices[..., 0] >= 0
+    z_export = sum(codebooks[q, indices[..., q][valid]] for q in range(n_tokens))
+    assert torch.allclose(z_export, z_q[valid], atol=1e-5)
