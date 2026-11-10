@@ -31,7 +31,6 @@ from lightning.pytorch.callbacks import BasePredictionWriter
 from omegaconf import DictConfig
 
 from heptokens.cli_utils import with_help
-from heptokens.models.latent_bins import LatentBins
 from heptokens.models.vq_vae import LitVqVae
 from heptokens.traced_modules import save_inference_modules
 
@@ -39,20 +38,8 @@ log = logging.getLogger(__name__)
 
 
 def extract_codebooks(model: LitVqVae) -> np.ndarray:
-    """Return codebook embeddings as [num_quantizers, codebook_size, codebook_dim].
-
-    For a LatentBins model each latent dimension is one quantizer: codebooks[q, k] holds the
-    centre of bin k on axis q and zeros elsewhere, so the module's reconstruction rule gives
-    the binned latent.
-    """
-    vq = model.vector_quantization
-    if isinstance(vq, LatentBins):
-        centres = vq.get_output_from_indices(torch.arange(vq.num_bins))  # [num_bins]
-        axes = torch.eye(vq.dim)  # [dim, dim]
-        codebooks = axes[:, None, :] * centres[None, :, None]  # [dim, num_bins, dim]
-    else:
-        codebooks = torch.stack([layer.codebook for layer in vq.layers])
-    return codebooks.detach().cpu().numpy()
+    """Return the quantizer's codebooks as [num_quantizers, codebook_size, codebook_dim]."""
+    return model.vector_quantization.codebooks().detach().float().cpu().numpy()
 
 
 def _to_int16(tokens: torch.Tensor, name: str) -> np.ndarray:

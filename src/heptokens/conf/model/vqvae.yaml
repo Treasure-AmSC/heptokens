@@ -1,5 +1,8 @@
 ---
 # configs/model/vqvae.yaml
+defaults:
+  - quantizer: residual_vq
+  - _self_
 _target_: heptokens.models.vq_vae.LitVqVae
 encoder:
   _target_: heptokens.models.coders.Encoder
@@ -15,9 +18,7 @@ decoder:
     _target_: heptokens.models.coders.CoderModel
     _partial_: true
     hidden_dims: [128, 256, 512]
-codebook_size: 512
 codebook_dim: 6
-num_quantizers: 3
 learning_rate: 1e-3
 optimizer:
   _target_: torch.optim.Adam

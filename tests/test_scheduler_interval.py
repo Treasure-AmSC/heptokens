@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from heptokens.models.coders import Decoder, Encoder
+from heptokens.models.quantizers import ResidualVQQuantizer
 from heptokens.models.utils import linear_warmup_cosine_decay
 from heptokens.models.vq_vae import LitVqVae
 
@@ -14,9 +15,8 @@ def _model(**kwargs) -> LitVqVae:
     return LitVqVae(
         encoder=partial(Encoder),
         decoder=partial(Decoder),
-        codebook_size=16,
+        quantizer=partial(ResidualVQQuantizer, codebook_size=16, num_quantizers=2),
         codebook_dim=4,
-        num_quantizers=2,
         data_sample=torch.zeros(3, 5),
         optimizer=partial(torch.optim.Adam, lr=3e-4),
         scheduler=partial(

@@ -2,6 +2,23 @@
 
 ## 0.2.0
 
+### Breaking
+
+- **The VQ-VAE bottleneck is now an injected quantizer.** `LitVqVae` takes a required
+  `quantizer` (a partial `heptokens.models.quantizers.Quantizer`, called with
+  `dim=codebook_dim`) in place of `codebook_size`, `num_quantizers` and `commitment_weight`.
+  In Hydra configs this is a `quantizer:` block, with bundled options in the new
+  `model/quantizer` config group (`residual_vq`, `latent_bins`), so the bottleneck can be
+  swapped on the command line with e.g. `model/quantizer=latent_bins`.
+  - Migrate configs by moving `codebook_size` and `num_quantizers` into
+    `quantizer: {codebook_size: ..., num_quantizers: ...}` (with `defaults: [quantizer: residual_vq]`)
+    and `commitment_weight` to the quantizer's `commitment`.
+  - Checkpoints saved by heptokens 0.1 still load if you pass the matching quantizer:
+    `LitVqVae.load_from_checkpoint(path, quantizer=partial(ResidualVQQuantizer, codebook_size=..., num_quantizers=...))`.
+    The saved weights are unchanged.
+- Removed `DiffusionDecoder` and the `diffusion_vqvae` model config. They had not
+  worked since `LitVqVae` began passing `data_sample` to its decoder.
+
 ### Added
 
 - **Calorimeter-cell tokenizer** (#19, @jeffkrupa): model-side support for the COCOA
@@ -14,18 +31,19 @@
     constituents.
   - `scheduler_interval` hyperparameter to step the LR scheduler per `"step"` instead of
     per epoch.
-- **Dead-code revival** (#19, @jeffkrupa): `threshold_ema_dead_code > 0` on `LitVqVae` swaps
-  in `RevivingResidualVQ`, which reinitializes collapsed codebook entries to encoder outputs
-  from the current batch. The default (`0`) keeps the plain `ResidualVQ`.
-- **Latent-binning bottleneck** (#23, @Alonl14): `LitVqVae(latent_bins=...)` replaces the
-  RVQ with per-dimension uniform bins, with a `transformer_latent_bins` model config.
+- **Dead-code revival** (#19, @jeffkrupa): `threshold_ema_dead_code > 0` on
+  `ResidualVQQuantizer` reinitializes collapsed codebook entries to encoder outputs from
+  the current batch, never from padding. The default (`0`) disables it.
+- **Latent-binning bottleneck** (#23, @Alonl14): the `LatentBins` quantizer replaces the
+  RVQ with per-dimension uniform bins (`model/quantizer=latent_bins`, or the
+  `transformer_latent_bins` model config).
   Exports write one quantizer per latent dimension, and the exported codebooks reconstruct
   the binned latent.
 - **TorchScript inference modules** (#22): `heptokens-export` also writes scripted
   `encoder.pt`, `decoder.pt`, `codebook_lookup.pt` and `index_encoder.pt` to
   `<output_dir>/modules/`. They can be loaded with plain `torch.jit.load`, or through
-  `heptokens.traced_modules.VqVaeKit`. Models with custom coders or the `LatentBins`
-  bottleneck skip this step with a warning.
+  `heptokens.traced_modules.VqVaeKit`. This works with any quantizer, including `LatentBins`
+  (#25). Models with custom coders skip this step with a warning.
 - Continuous integration: lint and the test suite run on every pull request and on `main`.
 - `pixi run test` task.
 

@@ -4,6 +4,9 @@
 #
 # The VQVAE core (LitVqVae) is unchanged. Only the encoder and decoder
 # _target_ values need to point to your modality-specific classes.
+defaults:
+  - quantizer: residual_vq
+  - _self_
 _target_: heptokens.models.vq_vae.LitVqVae
 encoder:
   _target_: heptokens.models.new_modality_coders.MyEncoder  # TODO: update path
@@ -16,9 +19,9 @@ decoder:
   # output_dim is inferred from data_sample at runtime (see train.py)
   # TODO: add any extra constructor kwargs your Decoder needs
 # ── VQ-VAE hyperparameters ─────────────────────────────────────────────────
-codebook_size: 512  # number of codes per quantizer stage
 codebook_dim: 32  # latent dimension (also encoder output dim)
-num_quantizers: 4  # number of residual quantizer stages
-commitment_weight: 1.0
+quantizer:  # see quantizer/*.yaml; any heptokens.models.quantizers.Quantizer subclass
+  codebook_size: 512  # number of codes per quantizer stage
+  num_quantizers: 4  # number of residual quantizer stages
 reconstruction_weight: 1.0
 learning_rate: 1e-3
