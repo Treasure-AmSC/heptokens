@@ -8,7 +8,6 @@ revival is disabled and behavior is identical to the base classes.
 """
 
 import torch
-
 from vector_quantize_pytorch import VectorQuantize
 
 
@@ -26,7 +25,14 @@ class RevivingVectorQuantize(VectorQuantize):
         super().__init__(*args, **kwargs)
         self.threshold_ema_dead_code = threshold_ema_dead_code
 
-    def forward(self, input: torch.Tensor):
+    def forward(self, input: torch.Tensor, mask: torch.Tensor | None = None):
+        """Quantize ``input`` [..., dim], then revive dead codes (training only).
+
+        Args:
+            mask: Optional boolean tensor matching ``input.shape[:-1]``, True for valid
+                positions. Revived codes are only sampled from valid positions, so padding
+                never becomes a codebook entry.
+        """
         quantize, embed_ind, loss = super().forward(input)
 
         if self.training and self.threshold_ema_dead_code > 0:
@@ -35,12 +41,19 @@ class RevivingVectorQuantize(VectorQuantize):
                 n_dead = int(dead_mask.sum().item())
                 if n_dead > 0:
                     flatten = input.reshape(-1, self.dim)
+                    if mask is not None:
+                        flatten = flatten[mask.reshape(-1).bool()]
                     n_samples = flatten.shape[0]
                     if n_samples > 0:
                         rand_idx = torch.randint(0, n_samples, (n_dead,), device=flatten.device)
-                        replacement = flatten[rand_idx].t()  # [dim, n_dead]
+                        # Match the codebook buffers' dtype (inputs may be fp16/bf16 under AMP).
+                        replacement = flatten[rand_idx].t().to(self.embed)  # [dim, n_dead]
                         self.embed.data[:, dead_mask] = replacement
-                        self.embed_avg.data[:, dead_mask] = replacement
+                        # embed_avg is an EMA *sum* that gets divided by cluster_size, so
+                        # scale it to keep embed_avg / cluster_size == replacement.
+                        self.embed_avg.data[:, dead_mask] = (
+                            replacement * self.threshold_ema_dead_code
+                        )
                         # Reset cluster_size just above threshold so revived
                         # codes aren't immediately re-flagged as dead next step.
                         self.cluster_size.data[dead_mask] = self.threshold_ema_dead_code
@@ -58,7 +71,8 @@ class RevivingResidualVQ(torch.nn.Module):
             [RevivingVectorQuantize(**kwargs) for _ in range(num_quantizers)]
         )
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None):
+        """Quantize ``x`` [..., dim]; ``mask`` (True = valid) is passed to each layer's revival."""
         quantized_out = 0.0
         residual = x
 
@@ -66,7 +80,7 @@ class RevivingResidualVQ(torch.nn.Module):
         all_indices = []
 
         for layer in self.layers:
-            quantized, indices, loss = layer(residual)
+            quantized, indices, loss = layer(residual, mask=mask)
             residual = residual - quantized
             quantized_out = quantized_out + quantized
 

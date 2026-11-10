@@ -113,8 +113,8 @@ class SetToVectorTransformer(nn.Module):
         pooling: How the per-token outputs are reduced to one vector:
 
             - ``"mean"``: mean over valid tokens.
-            - ``"sum"``: sum over valid tokens, followed by a LayerNorm. Not normalized by
-              the number of tokens, so suited to targets that scale with the sum over
+            - ``"sum"``: LayerNorm on each token, then sum over valid tokens. Not normalized
+              by the number of tokens, so suited to targets that scale with the sum over
               constituents (e.g. jet pT).
             - ``"max"``: element-wise max over valid tokens.
             - ``"cls"``: output at a learned CLS token prepended to the sequence.
@@ -185,11 +185,13 @@ class SetToVectorTransformer(nn.Module):
             else:
                 pooled = seq_out.mean(dim=1)
         elif self.pooling == "sum":
+            # Normalize per token, not after summing: a LayerNorm on the sum would cancel
+            # the scaling with token multiplicity that sum pooling exists to preserve.
+            seq_out = self.pool_norm(seq_out)
             if mask is not None:
                 pooled = (seq_out * mask.unsqueeze(-1)).sum(dim=1)
             else:
                 pooled = seq_out.sum(dim=1)
-            pooled = self.pool_norm(pooled)
         elif self.pooling == "max":
             if mask is not None:
                 seq_out_masked = seq_out.masked_fill(~mask.unsqueeze(-1), float("-inf"))

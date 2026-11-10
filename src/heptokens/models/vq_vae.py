@@ -119,14 +119,19 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         # Encode
         z_e = self.encoder(batch)  # [batch_size, n_csts, codebook_dim]
 
-        # Quantize
-        z_q, indices_batched, commit_loss = self.vector_quantization(z_e)
+        # Mask is optional; some modalities have no padding, and self.mask_key may be
+        # None to disable masking entirely.
+        mask = batch.get(self.mask_key)
+
+        # Quantize. Dead-code revival takes the mask so padding is never sampled as a code.
+        if isinstance(self.vector_quantization, RevivingResidualVQ):
+            z_q, indices_batched, commit_loss = self.vector_quantization(z_e, mask=mask)
+        else:
+            z_q, indices_batched, commit_loss = self.vector_quantization(z_e)
 
         # Move dimensions [n_codes, batch_dim, n_csts] -> [batch_dim, n_csts, n_codes]
         indices = indices_batched.permute(1, 2, 0).contiguous()
-        # Set masked positions to -1 (mask is optional; some modalities have no padding,
-        # and self.mask_key may be None to disable masking entirely)
-        mask = batch.get(self.mask_key)
+        # Set masked positions to -1
         if mask is not None:
             indices = indices.masked_fill(~mask.unsqueeze(-1), -1)
 
