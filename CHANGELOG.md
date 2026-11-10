@@ -26,11 +26,23 @@
   `<output_dir>/modules/`. They can be loaded with plain `torch.jit.load`, or through
   `heptokens.traced_modules.VqVaeKit`. Models with custom coders or the `LatentBins`
   bottleneck skip this step with a warning.
+- **Positions-out building blocks** (#21, @jeffkrupa): keep per-element positions out of
+  the VQ-VAE input (`csts`) and tokenize them separately.
+  - `position_features` on `StructuredArrayHDF5Dataset` and `StructuredArrayIterableDataset`
+    returns the listed fields as a separate tensor (key set by `output_positions_key`,
+    default `"positions"`).
+  - `PositionTokenizer`: a fixed-bin (non-learned) uniform quantizer with one token per
+    position feature, and `decode` back to bin centres. It plugs into `heptokens-export`
+    through the `pos_tokenizer` config option.
+  - `phi_to_cossin` replaces an angle column with its cosine and sine.
+  - `load_transformer(..., features=..., fitted_features=...)` and `select_features` reuse a
+    fitted log+standard scaler on a subset of its columns, selected by name.
 - Continuous integration: lint and the test suite run on every pull request and on `main`.
 - `pixi run test` task.
 
 ### Changed
 
+- `inverse_preprocess_batch` accepts `jet_fn=None` to invert constituents only (#21).
 - Token export raises `OverflowError` instead of silently wrapping when an index does not
   fit the int16 export format (#23, @Alonl14).
 - The `export` output file is named after `datamodule.dataset.file_path` when the datamodule
