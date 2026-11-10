@@ -36,13 +36,16 @@ Create a YAML file describing your data. This is the only config you must supply
 ```yaml
 # my_configs/datamodule/my_jets.yaml
 _target_: heptokens.data.structured_array.StructuredArrayModule
-data_path: /path/to/data.h5
-obj_group: jets
-set_group: tracks
-obj_features: [pt, eta, phi]
-set_features: [pt, deta, dphi, d0, z0]
-label_key: HadronConeExclTruthLabelID
-mask_key: valid
+dataset:
+  _target_: heptokens.data.structured_array.StructuredArrayHDF5Dataset
+  _partial_: true
+  file_path: /path/to/data.h5
+  obj_group: jets
+  set_group: tracks
+  obj_features: [pt, eta, phi]
+  set_features: [pt, deta, dphi, d0, z0]
+  label_key: HadronConeExclTruthLabelID
+  mask_key: valid
 train_frac: 0.7
 val_frac: 0.15
 test_frac: 0.15

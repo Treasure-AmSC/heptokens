@@ -124,8 +124,14 @@ def test_l1_energy_loss_is_mean_absolute_error():
 
     for alpha in (0.0, 0.7):
         decoder = CellDecoder(
-            input_dim=5, output_dim=8, model=CoderModel, input_key="energy",
-            mask_key="mask", energy_loss_alpha=alpha, energy_power=p, energy_loss_type="l1",
+            input_dim=5,
+            output_dim=8,
+            model=CoderModel,
+            input_key="energy",
+            mask_key="mask",
+            energy_loss_alpha=alpha,
+            energy_power=p,
+            energy_loss_type="l1",
         )
         decoder.forward = lambda _z, _b: fixed_recon
         decoder.compute_loss(torch.zeros(1, 1, 5), batch)
