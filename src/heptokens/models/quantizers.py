@@ -76,6 +76,24 @@ class Quantizer(nn.Module, ABC):
 # ---------------------------------------------------------------------------
 
 
+def residual_vq_indices(z_e: torch.Tensor, embeds: List[torch.Tensor]) -> torch.Tensor:
+    """Residual argmin search: ``z_e [..., dim]`` -> ``[..., Q]`` tokens, one ``embeds[q]``
+    ``[dim, K]`` (VectorQuantize.embed's layout, so distances match training's) per stage."""
+    residual = z_e.reshape(-1, z_e.shape[-1])
+    indices: List[torch.Tensor] = []
+    for embed in embeds:
+        dist = (
+            residual.pow(2).sum(1, keepdim=True)
+            - 2 * residual @ embed
+            + embed.pow(2).sum(0, keepdim=True)
+        )
+        idx = (-dist).max(1).indices
+        residual = residual - torch.nn.functional.embedding(idx, embed.t())
+        indices.append(idx)
+    shape = list(z_e.shape[:-1])
+    return torch.stack(indices, dim=-1).reshape(shape + [len(indices)])
+
+
 # ``vector_quantize_pytorch`` 0.2.2 has no protection against codebook collapse: once a
 # code's EMA cluster size decays to ~0 it is never revived. RevivingVectorQuantize
 # reinitializes dead codes to a real encoder output from the current batch. With
@@ -193,6 +211,11 @@ class ResidualVQQuantizer(Quantizer):
     def index_encoder(self) -> "ResidualVQIndexEncoder":
         return ResidualVQIndexEncoder(self.codebooks())
 
+    @torch.no_grad()
+    def encode_indices(self, z_e: torch.Tensor) -> torch.Tensor:
+        # Search the live layer buffers: index_encoder() would copy every codebook per call.
+        return residual_vq_indices(z_e, [layer.embed for layer in self.layers])
+
 
 class ResidualVQIndexEncoder(torch.nn.Module):
     """TorchScript-able residual-VQ argmin search: ``z_e [..., dim]`` -> ``[..., Q]`` tokens.
@@ -210,20 +233,7 @@ class ResidualVQIndexEncoder(torch.nn.Module):
         self.register_buffer("embeds", codebooks.detach().transpose(1, 2).contiguous())
 
     def forward(self, z_e: torch.Tensor) -> torch.Tensor:
-        residual = z_e.reshape(-1, z_e.shape[-1])
-        indices: List[torch.Tensor] = []
-        for q in range(self.embeds.shape[0]):
-            embed = self.embeds[q]  # [dim, K]
-            dist = (
-                residual.pow(2).sum(1, keepdim=True)
-                - 2 * residual @ embed
-                + embed.pow(2).sum(0, keepdim=True)
-            )
-            idx = (-dist).max(1).indices
-            residual = residual - torch.nn.functional.embedding(idx, embed.t())
-            indices.append(idx)
-        shape = list(z_e.shape[:-1])
-        return torch.stack(indices, dim=-1).reshape(shape + [len(indices)])
+        return residual_vq_indices(z_e, self.embeds.unbind(0))
 
 
 # ---------------------------------------------------------------------------

@@ -29,8 +29,6 @@ decoder:
     dropout: 0.
     activation: gelu
 codebook_dim: 12
-quantizer:
-  num_quantizers: 5
 learning_rate: 1e-3
 optimizer:
   _target_: torch.optim.Adam

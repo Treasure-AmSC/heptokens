@@ -20,8 +20,8 @@ decoder:
   # TODO: add any extra constructor kwargs your Decoder needs
 # ── VQ-VAE hyperparameters ─────────────────────────────────────────────────
 codebook_dim: 32  # latent dimension (also encoder output dim)
-quantizer:  # see quantizer/*.yaml; any heptokens.models.quantizers.Quantizer subclass
-  codebook_size: 512  # number of codes per quantizer stage
-  num_quantizers: 4  # number of residual quantizer stages
+# Quantizer: pick one from quantizer/*.yaml in the defaults list above, or any
+# heptokens.models.quantizers.Quantizer subclass. Tune it from the command line,
+# e.g. model.quantizer.num_quantizers=4, so switching quantizers still works.
 reconstruction_weight: 1.0
 learning_rate: 1e-3

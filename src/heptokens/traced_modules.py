@@ -237,7 +237,9 @@ def build_inference_modules(model: "LitVqVae") -> Dict[str, nn.Module]:
     tensor_decoder = TensorDecoder(decoder.coder.model)
 
     quantizer = model.vector_quantization
-    codebook_lookup = CodebookLookup(quantizer.codebooks().detach())  # [Q, K, D]
+    # .to(): a quantizer may build codebooks on CPU (LatentBins has no parameters)
+    device = next(encoder.parameters()).device
+    codebook_lookup = CodebookLookup(quantizer.codebooks().detach().to(device))  # [Q, K, D]
     index_encoder = TensorIndexEncoder(tensor_encoder, quantizer.index_encoder())
 
     return {
