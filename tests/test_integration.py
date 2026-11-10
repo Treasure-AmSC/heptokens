@@ -12,6 +12,21 @@ from heptokens.traced_modules import VqVaeKit
 from heptokens.train import train
 
 
+def _dataset_cfg(hdf5_file):
+    """Hydra partial for the synthetic HDF5 dataset, as StructuredArrayModule expects."""
+    return {
+        "_target_": "heptokens.data.structured_array.StructuredArrayHDF5Dataset",
+        "_partial_": True,
+        "file_path": str(hdf5_file),
+        "obj_group": "jets",
+        "set_group": "tracks",
+        "obj_features": ["pt", "eta"],
+        "set_features": ["pt", "eta", "phi"],
+        "label_key": "label",
+        "mask_key": "valid",
+    }
+
+
 @pytest.fixture
 def train_cfg(hdf5_file, tmp_path):
     output_dir = tmp_path / "results"
@@ -32,13 +47,7 @@ def train_cfg(hdf5_file, tmp_path):
             "full_path": str(full_path),
             "datamodule": {
                 "_target_": "heptokens.data.structured_array.StructuredArrayModule",
-                "data_path": str(hdf5_file),
-                "obj_group": "jets",
-                "set_group": "tracks",
-                "obj_features": ["pt", "eta"],
-                "set_features": ["pt", "eta", "phi"],
-                "label_key": "label",
-                "mask_key": "valid",
+                "dataset": _dataset_cfg(hdf5_file),
                 "train_frac": 0.7,
                 "val_frac": 0.15,
                 "test_frac": 0.15,
@@ -115,13 +124,7 @@ def test_train_then_export(train_cfg, hdf5_file, tmp_path):
             "full_path": str(export_dir),
             "datamodule": {
                 "_target_": "heptokens.data.structured_array.StructuredArrayModule",
-                "data_path": str(hdf5_file),
-                "obj_group": "jets",
-                "set_group": "tracks",
-                "obj_features": ["pt", "eta"],
-                "set_features": ["pt", "eta", "phi"],
-                "label_key": "label",
-                "mask_key": "valid",
+                "dataset": _dataset_cfg(hdf5_file),
                 "train_frac": 0.0,
                 "val_frac": 0.0,
                 "test_frac": 1.0,
