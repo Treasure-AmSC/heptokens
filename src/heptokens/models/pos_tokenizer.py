@@ -55,12 +55,18 @@ class PositionTokenizer(nn.Module):
         """Bin ``positions`` [..., n_features] into LongTensor indices of the same shape."""
         if positions.shape[-1] != self.n_features:
             raise ValueError(f"Expected last dim {self.n_features}, got {positions.shape[-1]}")
-        eps = 1e-6
-        clamped = torch.clamp(positions, self.mins, self.maxs - eps)
-        idx = ((clamped - self.mins) / self.widths).long()
-        return torch.clamp(idx, min=torch.zeros_like(self.max_idx), max=self.max_idx)
+        # Buffers may sit on a different device than ``positions`` when the tokenizer
+        # is held outside the LightningModule (e.g. by the prediction writer).
+        device = positions.device
+        mins, maxs = self.mins.to(device), self.maxs.to(device)
+        widths, max_idx = self.widths.to(device), self.max_idx.to(device)
+        clamped = torch.clamp(positions, mins, maxs)
+        # The maximum maps to bin n_bins; the index clamp folds it into the last bin.
+        idx = ((clamped - mins) / widths).long()
+        return torch.clamp(idx, min=torch.zeros_like(max_idx), max=max_idx)
 
     @torch.no_grad()
     def decode(self, indices: torch.Tensor) -> torch.Tensor:
         """Map bin indices [..., n_features] back to bin-centre positions."""
-        return self.mins + (indices.float() + 0.5) * self.widths
+        device = indices.device
+        return self.mins.to(device) + (indices.float() + 0.5) * self.widths.to(device)

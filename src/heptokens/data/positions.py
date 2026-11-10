@@ -10,6 +10,8 @@ def phi_to_cossin(
 
     Returns [..., P + 1]; entries where ``mask`` is False are set to zero.
     """
+    # Normalise so negative indices slice correctly; raises IndexError if out of range.
+    phi_index = range(positions.shape[-1])[phi_index]
     phi = positions[..., phi_index]
     out = np.concatenate(
         [

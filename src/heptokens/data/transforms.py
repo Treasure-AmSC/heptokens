@@ -248,9 +248,6 @@ def select_features(
     for name, names in (("fitted_features", fitted_features), ("features", features)):
         if len(set(names)) != len(names):
             raise ValueError(f"{name} contains duplicates: {names}")
-    missing = [f for f in features if f not in fitted_features]
-    if missing:
-        raise ValueError(f"features {missing} are not among fitted_features {fitted_features}")
     for cfg in transformer.log_transformer.feature_configs:
         # Copied as-is, so only stateless element-wise transforms are safe to slice.
         if not all(type(t) is LogScaleTransform for t in cfg["transformers"]):
@@ -261,6 +258,8 @@ def select_features(
     configs = []
     for cfg in transformer.log_transformer.feature_configs:
         idx = [cfg["indices"]] if isinstance(cfg["indices"], int) else list(cfg["indices"])
+        # Normalise negative indices (valid in NumPy indexing) so they match ``new_index``.
+        idx = [i % transformer.n_features_in_ for i in idx]
         kept = [new_index[i] for i in idx if i in new_index]
         if kept:
             configs.append({"indices": kept, "transformers": copy.deepcopy(cfg["transformers"])})

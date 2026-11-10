@@ -45,6 +45,33 @@ def test_tokenizer_roundtrip_within_half_bin():
     assert torch.all((tok.decode(tok(x)) - x).abs() <= tok.widths / 2 + 1e-6)
 
 
+def test_tokenizer_upper_bins_reachable_for_narrow_ranges():
+    tok = PositionTokenizer(ranges=[(0.0, 1e-5)], n_bins=1024)
+    assert tok(torch.tensor([[1e-5]])).item() == 1023
+
+
+_ACCELERATORS = [
+    d
+    for d, ok in (
+        ("cuda", torch.cuda.is_available()),
+        ("mps", torch.backends.mps.is_available()),
+    )
+    if ok
+]
+
+
+@pytest.mark.skipif(not _ACCELERATORS, reason="no accelerator available")
+def test_tokenizer_follows_input_device():
+    # The prediction writer holds the tokenizer on CPU while batches arrive on the accelerator.
+    tok = PositionTokenizer(ranges=[(-1.0, 1.0), (0.0, 4.0)], n_bins=[4, 2])
+    device = _ACCELERATORS[0]
+    x = torch.tensor([[-0.26, 1.99], [0.99, 2.0]])
+    idx = tok(x.to(device))
+    assert idx.device.type == device
+    assert idx.cpu().tolist() == tok(x).tolist()
+    assert torch.equal(tok.decode(idx).cpu(), tok.decode(tok(x)))
+
+
 def test_tokenizer_rejects_wrong_shapes():
     with pytest.raises(ValueError):
         PositionTokenizer(ranges=[(0, 1), (0, 1)], n_bins=[4])
@@ -61,6 +88,13 @@ def test_phi_to_cossin():
     assert np.array_equal(out[0, 0], [0.5, cos, sin])
     assert np.array_equal(out[0, 1], [0.0, 0.0, 0.0])
     assert np.array_equal(phi_to_cossin(pos[..., ::-1], phi_index=0)[0, 0], [cos, sin, 0.5])
+
+
+def test_phi_to_cossin_negative_index():
+    pos = np.array([[[0.5, 0.3]]], dtype=np.float32)
+    assert np.array_equal(phi_to_cossin(pos, phi_index=-1), phi_to_cossin(pos, phi_index=1))
+    with pytest.raises(IndexError):
+        phi_to_cossin(pos, phi_index=2)
 
 
 FITTED = ["pt", "eta", "phi", "d0", "z0"]
@@ -88,11 +122,23 @@ def test_select_features_matches_full_on_kept_columns():
     )
 
 
+def test_select_features_keeps_negative_log_indices():
+    rng = np.random.default_rng(0)
+    x = rng.lognormal(size=(500, 5)).astype(np.float32)
+    full = create_preprocessing_transformer(
+        "log_standard", log_feature_indices=[-1], n_features=5
+    ).fit(x)
+    features = ["pt", "z0"]
+    keep = [FITTED.index(f) for f in features]
+    sliced = select_features(full, FITTED, features)
+    assert np.allclose(sliced.transform(x[:, keep]), full.transform(x)[:, keep], rtol=0, atol=1e-6)
+
+
 @pytest.mark.parametrize(
     "fitted, features, match",
     [
         (FITTED[:4], ["pt"], "fitted on 5 columns"),
-        (FITTED, ["pt", "theta"], "not among fitted_features"),
+        (FITTED, ["pt", "theta"], "not in list"),  # raised by list.index
         (FITTED, ["pt", "pt"], "duplicates"),
         (["pt", "pt", "phi", "d0", "z0"], ["pt"], "duplicates"),
     ],
