@@ -235,7 +235,7 @@ environments:
       - conda: https://conda.anaconda.org/nvidia/noarch/cuda-cudart-dev_linux-64-12.9.79-0.conda
       - conda: https://conda.anaconda.org/nvidia/noarch/cuda-cudart-static_linux-64-12.9.79-0.conda
       - conda: https://conda.anaconda.org/nvidia/noarch/cuda-cudart_linux-64-12.9.79-0.conda
-      - conda: https://conda.anaconda.org/nvidia/noarch/cuda-version-12.9-3.conda
+      - conda: https://conda.anaconda.org/nvidia/noarch/cuda-version-12.9-h4f385c5_4.conda
       - conda: https://conda.anaconda.org/pytorch/linux-64/ffmpeg-4.3-hf484d3e_0.tar.bz2
       - conda: https://conda.anaconda.org/pytorch/linux-64/libjpeg-turbo-2.0.0-h9bf148f_0.tar.bz2
       - conda: https://conda.anaconda.org/pytorch/linux-64/pytorch-2.5.1-py3.11_cuda12.1_cudnn9.1.0_0.tar.bz2
@@ -4357,15 +4357,16 @@ packages:
   license: LicenseRef-NVIDIA-End-User-License-Agreement
   size: 193644
   timestamp: 1747087788385
-- conda: https://conda.anaconda.org/nvidia/noarch/cuda-version-12.9-3.conda
-  sha256: d05c0d4e2d1fbf32275db798275b9a8b57e97c0748f4c073ba6c532fe839bb06
-  md5: 40969c18662ba1d35292e70e8545ce90
+- conda: https://conda.anaconda.org/nvidia/noarch/cuda-version-12.9-h4f385c5_4.conda
+  sha256: cf71a7baeba544374db44c2ae82f9b65cf0440cbdb369d3ad5ae0a9ad8e9dc1b
+  md5: fba5fadcfb1806a9619e729c47667416
   constrains:
   - __cuda >=12
   - cudatoolkit 12.9|12.9.*
   license: LicenseRef-NVIDIA-End-User-License-Agreement
-  size: 17161
-  timestamp: 1748727273518
+  run_exports: {}
+  size: 22272
+  timestamp: 1784615139770
 - conda: https://conda.anaconda.org/pytorch/linux-64/ffmpeg-4.3-hf484d3e_0.tar.bz2
   sha256: 60b3e36cb36b706f5850f155bd9d3f33194a522b5ef20be46cb37dbc987a6741
   md5: 0b0bf7c3d7e146ef91de5310bbf7a230
