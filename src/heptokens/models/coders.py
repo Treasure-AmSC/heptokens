@@ -72,7 +72,12 @@ class CoderModel(nn.Module):
         layers.append(nn.Linear(prev_dim, output_dim))
         self.model = nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        positions: Optional[torch.Tensor] = None,  # noqa: ARG002 -- unused; per-patch MLP needs no positional info
+    ) -> torch.Tensor:
         """Forward pass through the model."""
         if mask is not None:
             # Select valid inputs
@@ -91,6 +96,21 @@ class CoderModel(nn.Module):
 
 
 class Coder(nn.Module):
+    """Wraps an inner model (e.g. ``CoderModel``, ``Transformer``) that maps batch tensors.
+
+    Args:
+        input_dim: Input feature dimension of the inner model.
+        output_dim: Output feature dimension of the inner model.
+        model: Inner model class, called as ``model(input_dim=..., output_dim=...)``.
+        input_key: Batch key of the input tensor.
+        mask_key: Batch key of the boolean validity mask.
+        positions_key: Optional batch key of a per-token coordinates tensor (e.g.
+            ``[eta, cos_phi, sin_phi]``). If set, it is passed to the inner model as
+            ``positions=...`` for positional encoding (see ``Transformer(pos_dim=...)``).
+            ``None`` (default) passes nothing.
+        data_sample: Accepted for callers that pass it (e.g. ``LitVqVae``); unused.
+    """
+
     def __init__(
         self,
         input_dim: int,
@@ -98,14 +118,14 @@ class Coder(nn.Module):
         model: nn.Module = CoderModel,
         input_key: str = "csts",
         mask_key: str = "mask",
+        positions_key: Optional[str] = None,
         data_sample=None,
     ):
         super(Coder, self).__init__()
-        # Build coder (encoder/decoder). data_sample is accepted for
-        # callers that pass it (e.g. LitVqVae)
         self.coder = model(input_dim=input_dim, output_dim=output_dim)
         self.input_key = input_key
         self.mask_key = mask_key
+        self.positions_key = positions_key
 
 
 class Encoder(Coder, BaseEncoder):
@@ -124,7 +144,10 @@ class Encoder(Coder, BaseEncoder):
             with invalid (masked) positions zeroed out.
         """
         mask = batch.get(self.mask_key)
-        z_e = self.coder(batch[self.input_key], mask)
+        if self.positions_key:
+            z_e = self.coder(batch[self.input_key], mask, positions=batch.get(self.positions_key))
+        else:
+            z_e = self.coder(batch[self.input_key], mask)
         return z_e
 
 
@@ -142,6 +165,8 @@ class Decoder(Coder, BaseDecoder):
             with invalid positions zeroed out.
         """
         mask = batch.get(self.mask_key)
+        if self.positions_key:
+            return self.coder(z_q, mask, positions=batch.get(self.positions_key))
         return self.coder(z_q, mask)
 
     def compute_loss(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -172,13 +197,62 @@ class CellDecoder(Decoder):
     """Decoder for calorimeter cell patch data with pixel-level sparsity handling.
 
     Expects the input key to hold a tensor of shape ``[B, T, 2*n_pixels]`` where
-    the first half is the energy (energy^0.3) and the second half is a binary
-    pixel-level occupancy indicator — both computed in ``CellDataset.__getitem__``.
+    the first half is the energy (energy^p, p=``energy_power``) and the second
+    half is a binary pixel-level occupancy indicator — both computed in
+    ``CellDataset.__getitem__``.
 
     Loss:
       - Binary cross-entropy on the indicator for all pixels in non-empty patches
-      - MSE on energy for pixels where the indicator is 1 (occupied pixels only)
+      - MSE (or L1, ``energy_loss_type="l1"``) on energy for pixels where the
+        indicator is 1 (occupied pixels only),
+        optionally weighted per pixel by ``w_i = E_i**energy_loss_alpha`` where
+        ``E_i`` is the linear truth energy recovered from the compressed target
+        (``E = y**(1/energy_power)``). ``energy_loss_alpha=0`` reproduces the
+        original unweighted MSE exactly.
+
+    After each ``compute_loss`` call, ``self.last_metrics`` holds the scalar
+    breakdown (weighted/unweighted energy loss, occupancy BCE) plus the
+    configured alpha, so the Lightning module can log them.
+
+    Args:
+        energy_loss_alpha: Exponent alpha for the per-pixel energy-MSE weight
+            ``w_i = E_i**alpha`` (E_i = linear truth energy). 0 disables
+            weighting (bitwise-identical to the original loss).
+        energy_power: Preprocessing energy compression exponent p (targets are
+            stored as ``E**p``); the inverse ``1/p`` recovers linear energy.
+            Must match ``preprocess_hep4m_cells.py``'s ``ENERGY_POWER``.
+        energy_loss_type: Per-pixel energy loss, ``"mse"`` (default, original
+            loss) or ``"l1"``. The alpha weighting applies to either.
     """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        model: nn.Module = CoderModel,
+        input_key: str = "csts",
+        mask_key: str = "mask",
+        positions_key: Optional[str] = None,
+        data_sample=None,
+        energy_loss_alpha: float = 0.0,
+        energy_power: float = 0.3,
+        energy_loss_type: str = "mse",
+    ):
+        super().__init__(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            model=model,
+            input_key=input_key,
+            mask_key=mask_key,
+            positions_key=positions_key,
+            data_sample=data_sample,
+        )
+        self.energy_loss_alpha = float(energy_loss_alpha)
+        self.energy_power = float(energy_power)
+        if energy_loss_type not in ("mse", "l1"):
+            raise ValueError(f"energy_loss_type must be 'mse' or 'l1', got {energy_loss_type!r}")
+        self.energy_loss_type = energy_loss_type
+        self.last_metrics: Dict[str, float] = {}
 
     def compute_loss(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         targets = batch[self.input_key]  # [B, T, 2*n_pixels]
@@ -201,11 +275,43 @@ class CellDecoder(Decoder):
             pixel_mask = ind_true > 0.5
 
         if pixel_mask.any():
-            loss_energy = nn.functional.mse_loss(energy_recon[pixel_mask], energy_true[pixel_mask])
+            energy_recon_sel = energy_recon[pixel_mask]
+            energy_true_sel = energy_true[pixel_mask]
+            # Unweighted loss — for "mse" identical to the original loss (also
+            # the alpha=0 return value, so alpha=0 stays bitwise-identical).
+            if self.energy_loss_type == "l1":
+                loss_energy_unweighted = nn.functional.l1_loss(energy_recon_sel, energy_true_sel)
+            else:
+                loss_energy_unweighted = nn.functional.mse_loss(energy_recon_sel, energy_true_sel)
+            if self.energy_loss_alpha != 0.0:
+                # Targets are raw E**p — CellDataset applies no standardization
+                # (unlike tracks/topos), so E = y**(1/p) exactly and y>=0.
+                # Compute in float32: pow(1/p) can overflow fp16 under AMP.
+                energy_true_f = energy_true_sel.float()
+                energy_recon_f = energy_recon_sel.float()
+                energy_true_lin = energy_true_f.clamp(min=0.0).pow(1.0 / self.energy_power)
+                weight = energy_true_lin.pow(self.energy_loss_alpha)
+                diff = energy_recon_f - energy_true_f
+                per_pixel = diff.abs() if self.energy_loss_type == "l1" else diff**2
+                # Normalize by sum(w) (not pixel count) so the loss scale is
+                # comparable across alpha.
+                weight_sum = weight.sum().clamp_min(torch.finfo(weight.dtype).eps)
+                loss_energy = (weight * per_pixel).sum() / weight_sum
+            else:
+                loss_energy = loss_energy_unweighted
         else:
             loss_energy = recon.sum() * 0.0  # differentiable zero
+            loss_energy_unweighted = loss_energy
 
-        return loss_energy + loss_ind
+        loss = loss_energy + loss_ind
+
+        self.last_metrics = {
+            f"energy_{self.energy_loss_type}": loss_energy_unweighted.detach(),
+            f"energy_{self.energy_loss_type}_weighted": loss_energy.detach(),
+            "occupancy_bce": loss_ind.detach(),
+            "energy_loss_alpha": self.energy_loss_alpha,
+        }
+        return loss
 
 
 class DiffusionDecoder(BaseDecoder):

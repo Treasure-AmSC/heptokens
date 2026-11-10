@@ -31,16 +31,35 @@ from lightning.pytorch.callbacks import BasePredictionWriter
 from omegaconf import DictConfig
 
 from heptokens.cli_utils import with_help
+from heptokens.models.latent_bins import LatentBins
 from heptokens.models.vq_vae import LitVqVae
 
 log = logging.getLogger(__name__)
 
 
 def extract_codebooks(model: LitVqVae) -> np.ndarray:
-    """Return codebook embeddings as [num_quantizers, codebook_size, codebook_dim]."""
+    """Return codebook embeddings as [num_quantizers, codebook_size, codebook_dim].
+
+    For a LatentBins model each latent dimension is one quantizer: codebooks[q, k] holds the
+    centre of bin k on axis q and zeros elsewhere, so the module's reconstruction rule gives
+    the binned latent.
+    """
     vq = model.vector_quantization
-    codebooks = torch.stack([layer.codebook for layer in vq.layers])
+    if isinstance(vq, LatentBins):
+        centres = vq.get_output_from_indices(torch.arange(vq.num_bins))  # [num_bins]
+        axes = torch.eye(vq.dim)  # [dim, dim]
+        codebooks = axes[:, None, :] * centres[None, :, None]  # [dim, num_bins, dim]
+    else:
+        codebooks = torch.stack([layer.codebook for layer in vq.layers])
     return codebooks.detach().cpu().numpy()
+
+
+def _to_int16(tokens: torch.Tensor, name: str) -> np.ndarray:
+    """Cast token indices (-1 = masked) to the int16 export format, raising instead of wrapping."""
+    tokens = tokens.cpu().numpy()
+    if tokens.size and tokens.max() > np.iinfo(np.int16).max:
+        raise OverflowError(f"{name} index {tokens.max()} does not fit the int16 export format")
+    return tokens.astype(np.int16)
 
 
 class MemmapPredictionWriter(BasePredictionWriter):
@@ -117,7 +136,7 @@ class MemmapPredictionWriter(BasePredictionWriter):
     def write_on_batch_end(
         self, trainer, pl_module, prediction, batch_indices, batch, batch_idx, dataloader_idx
     ):
-        indices = prediction["indices"].cpu().numpy().astype(np.int16)
+        indices = _to_int16(prediction["indices"], "token")
         labels = prediction["labels"].cpu().numpy().astype(np.int8)
         n = len(labels)
 
@@ -135,9 +154,7 @@ class MemmapPredictionWriter(BasePredictionWriter):
                 mask = batch.get(self.mask_key)
                 if mask is not None:
                     pos_idx = pos_idx.masked_fill(~mask.unsqueeze(-1).bool(), -1)
-                self.pos_tokens_mmap[self.pos : self.pos + n] = (
-                    pos_idx.cpu().numpy().astype(np.int16)
-                )
+                self.pos_tokens_mmap[self.pos : self.pos + n] = _to_int16(pos_idx, "position token")
 
         self.pos += n
 
@@ -165,7 +182,8 @@ def export(cfg: DictConfig) -> None:
 
     total_jets = len(datamodule.test_set)
     num_elements = getattr(datamodule.test_set, "num_elements", 40)
-    num_quantizers = model.hparams.get("num_quantizers", 4)
+    codebooks = extract_codebooks(model)
+    num_quantizers = codebooks.shape[0]
 
     # Optional, opt-in export-layer position tokenization.
     pos_tokenizer = None
@@ -209,7 +227,6 @@ def export(cfg: DictConfig) -> None:
 
         indices = np.lib.format.open_memmap(str(writer.indices_path), mode="r")[:actual_jets]
         labels = np.lib.format.open_memmap(str(writer.labels_path), mode="r")[:actual_jets]
-        codebooks = extract_codebooks(model)
 
         stem = Path(cfg.datamodule.data_path).stem
         out_path = output_dir / f"{stem}.npz"
