@@ -7,7 +7,7 @@ Usage (from an experiment repo with local configs):
     python -m heptokens.export_tokens -cp configs \\
         ckpt_path=/path/to/vqvae/best.ckpt \\
         output_dir=results/tokenized/model_name \\
-        datamodule.data_path=/path/to/file.h5
+        datamodule.dataset.file_path=/path/to/file.h5
 
 Output npz contains:
     indices     : [N, num_elements, num_quantizers]  int16  (-1 = masked)
@@ -31,16 +31,36 @@ from lightning.pytorch.callbacks import BasePredictionWriter
 from omegaconf import DictConfig
 
 from heptokens.cli_utils import with_help
+from heptokens.models.latent_bins import LatentBins
 from heptokens.models.vq_vae import LitVqVae
+from heptokens.traced_modules import save_inference_modules
 
 log = logging.getLogger(__name__)
 
 
 def extract_codebooks(model: LitVqVae) -> np.ndarray:
-    """Return codebook embeddings as [num_quantizers, codebook_size, codebook_dim]."""
+    """Return codebook embeddings as [num_quantizers, codebook_size, codebook_dim].
+
+    For a LatentBins model each latent dimension is one quantizer: codebooks[q, k] holds the
+    centre of bin k on axis q and zeros elsewhere, so the module's reconstruction rule gives
+    the binned latent.
+    """
     vq = model.vector_quantization
-    codebooks = torch.stack([layer.codebook for layer in vq.layers])
+    if isinstance(vq, LatentBins):
+        centres = vq.get_output_from_indices(torch.arange(vq.num_bins))  # [num_bins]
+        axes = torch.eye(vq.dim)  # [dim, dim]
+        codebooks = axes[:, None, :] * centres[None, :, None]  # [dim, num_bins, dim]
+    else:
+        codebooks = torch.stack([layer.codebook for layer in vq.layers])
     return codebooks.detach().cpu().numpy()
+
+
+def _to_int16(tokens: torch.Tensor, name: str) -> np.ndarray:
+    """Cast token indices (-1 = masked) to the int16 export format, raising instead of wrapping."""
+    tokens = tokens.cpu().numpy()
+    if tokens.size and tokens.max() > np.iinfo(np.int16).max:
+        raise OverflowError(f"{name} index {tokens.max()} does not fit the int16 export format")
+    return tokens.astype(np.int16)
 
 
 class MemmapPredictionWriter(BasePredictionWriter):
@@ -117,7 +137,7 @@ class MemmapPredictionWriter(BasePredictionWriter):
     def write_on_batch_end(
         self, trainer, pl_module, prediction, batch_indices, batch, batch_idx, dataloader_idx
     ):
-        indices = prediction["indices"].cpu().numpy().astype(np.int16)
+        indices = _to_int16(prediction["indices"], "token")
         labels = prediction["labels"].cpu().numpy().astype(np.int8)
         n = len(labels)
 
@@ -135,9 +155,7 @@ class MemmapPredictionWriter(BasePredictionWriter):
                 mask = batch.get(self.mask_key)
                 if mask is not None:
                     pos_idx = pos_idx.masked_fill(~mask.unsqueeze(-1).bool(), -1)
-                self.pos_tokens_mmap[self.pos : self.pos + n] = (
-                    pos_idx.cpu().numpy().astype(np.int16)
-                )
+                self.pos_tokens_mmap[self.pos : self.pos + n] = _to_int16(pos_idx, "position token")
 
         self.pos += n
 
@@ -165,7 +183,8 @@ def export(cfg: DictConfig) -> None:
 
     total_jets = len(datamodule.test_set)
     num_elements = getattr(datamodule.test_set, "num_elements", 40)
-    num_quantizers = model.hparams.get("num_quantizers", 4)
+    codebooks = extract_codebooks(model)
+    num_quantizers = codebooks.shape[0]
 
     # Optional, opt-in export-layer position tokenization.
     pos_tokenizer = None
@@ -209,9 +228,16 @@ def export(cfg: DictConfig) -> None:
 
         indices = np.lib.format.open_memmap(str(writer.indices_path), mode="r")[:actual_jets]
         labels = np.lib.format.open_memmap(str(writer.labels_path), mode="r")[:actual_jets]
-        codebooks = extract_codebooks(model)
 
-        stem = Path(cfg.datamodule.data_path).stem
+        # data_path (flat), dataset.file_path (ATLAS-style nested), or data_paths (AOJ, list)
+        dm_cfg = cfg.datamodule
+        if "data_path" in dm_cfg:
+            file_path = dm_cfg.data_path
+        elif "dataset" in dm_cfg and "file_path" in dm_cfg.dataset:
+            file_path = dm_cfg.dataset.file_path
+        else:
+            file_path = dm_cfg.data_paths[0]
+        stem = Path(file_path).stem
         out_path = output_dir / f"{stem}.npz"
 
         save_dict = dict(indices=indices, labels=labels, codebooks=codebooks)
@@ -236,6 +262,12 @@ def export(cfg: DictConfig) -> None:
         np.savez_compressed(out_path, **save_dict)
         log.info(f"Saved {out_path}: {out_path.stat().st_size / 1e9:.2f} GB")
 
+        try:
+            modules_dir = save_inference_modules(model, output_dir)
+            log.info(f"Saved inference modules to {modules_dir}")
+        except NotImplementedError as e:
+            log.warning(f"Skipping traced module export: {e}")
+
 
 _HELP = """\
 heptokens-export  — export VQ-VAE token indices for a dataset
@@ -249,7 +281,8 @@ Required:
   output_dir=<DIR>            Directory to write the output .npz file
 
 Common overrides:
-  datamodule.data_path=<PATH> Path to the input HDF5 file
+  datamodule.dataset.file_path=<PATH>
+                              Path to the input HDF5 file
   datamodule.batch_size=2048  Batch size for inference
   trainer.devices=1           Number of GPUs
   pos_tokenizer=<NAME>        Optional position tokenizer config (disabled by default)

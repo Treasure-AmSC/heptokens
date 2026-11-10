@@ -5,6 +5,10 @@
 # Snakemake files
 .snakemake/
 
+# Completion markers written by training runs (heptokens.utils.hydra.save_declaration)
+SUCCESS.txt
+TEST_SUCCESS.txt
+
 # Python cache files
 __pycache__/
 *.py[cod]
