@@ -7,7 +7,7 @@ Usage (from an experiment repo with local configs):
     python -m heptokens.export_tokens -cp configs \\
         ckpt_path=/path/to/vqvae/best.ckpt \\
         output_dir=results/tokenized/model_name \\
-        datamodule.data_path=/path/to/file.h5
+        datamodule.dataset.file_path=/path/to/file.h5
 
 Output npz contains:
     indices     : [N, num_elements, num_quantizers]  int16  (-1 = masked)
@@ -228,7 +228,15 @@ def export(cfg: DictConfig) -> None:
         indices = np.lib.format.open_memmap(str(writer.indices_path), mode="r")[:actual_jets]
         labels = np.lib.format.open_memmap(str(writer.labels_path), mode="r")[:actual_jets]
 
-        stem = Path(cfg.datamodule.data_path).stem
+        # data_path (flat), dataset.file_path (ATLAS-style nested), or data_paths (AOJ, list)
+        dm_cfg = cfg.datamodule
+        if "data_path" in dm_cfg:
+            file_path = dm_cfg.data_path
+        elif "dataset" in dm_cfg and "file_path" in dm_cfg.dataset:
+            file_path = dm_cfg.dataset.file_path
+        else:
+            file_path = dm_cfg.data_paths[0]
+        stem = Path(file_path).stem
         out_path = output_dir / f"{stem}.npz"
 
         save_dict = dict(indices=indices, labels=labels, codebooks=codebooks)
@@ -266,7 +274,8 @@ Required:
   output_dir=<DIR>            Directory to write the output .npz file
 
 Common overrides:
-  datamodule.data_path=<PATH> Path to the input HDF5 file
+  datamodule.dataset.file_path=<PATH>
+                              Path to the input HDF5 file
   datamodule.batch_size=2048  Batch size for inference
   trainer.devices=1           Number of GPUs
   pos_tokenizer=<NAME>        Optional position tokenizer config (disabled by default)
