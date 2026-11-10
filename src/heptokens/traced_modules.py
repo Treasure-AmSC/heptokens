@@ -246,7 +246,8 @@ def build_inference_modules(model: "LitVqVae") -> Dict[str, nn.Module]:
     if isinstance(model.vector_quantization, LatentBins):
         raise NotImplementedError(
             "Cannot export traced modules: the LatentBins bottleneck is not yet supported "
-            "(the index encoder and codebook lookup assume a residual VQ)."
+            "(the index encoder and codebook lookup assume a residual VQ); see "
+            "https://github.com/Treasure-AmSC/heptokens/issues/25."
         )
 
     if not (hasattr(encoder, "coder") and hasattr(encoder.coder, "model")):
