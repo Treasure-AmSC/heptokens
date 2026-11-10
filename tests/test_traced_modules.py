@@ -295,3 +295,47 @@ def test_vqvaekit_load_and_roundtrip(tiny_vqvae, tmp_path):
 
     x_hat2 = kit.decode_from_indices(indices, mask)
     assert torch.allclose(x_hat, x_hat2)
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: NaN-safe masking, LatentBins guard, torch-only import
+# ---------------------------------------------------------------------------
+
+
+def test_encoder_and_decoder_zero_masked_nan_inputs(simple_mlp, valid_mask):
+    """Masked positions are exactly zero even if their inputs are NaN/Inf."""
+    x = torch.randn(B, T, 3)
+    x[0, -2:] = float("nan")
+    x[0, -1, 0] = float("inf")
+    z_e = TensorEncoder(simple_mlp)(x, valid_mask)
+    assert torch.all(z_e[0, -2:] == 0)
+    assert torch.isfinite(z_e[valid_mask]).all()
+
+    z_q = torch.randn(B, T, D)
+    z_q[0, -2:] = float("nan")
+    dec_mlp = nn.Sequential(nn.Linear(D, 3))
+    x_hat = TensorDecoder(dec_mlp)(z_q, valid_mask)
+    assert torch.all(x_hat[0, -2:] == 0)
+
+
+def test_build_inference_modules_raises_for_latent_bins(tiny_vqvae):
+    from heptokens.models.latent_bins import LatentBins
+
+    tiny_vqvae.vector_quantization = LatentBins(
+        dim=D, num_bins=8, bin_range=1.0, noise_std_bins=0.0
+    )
+    with pytest.raises(NotImplementedError, match="LatentBins"):
+        build_inference_modules(tiny_vqvae)
+
+
+def test_traced_modules_import_does_not_need_training_deps():
+    """Importing the inference utilities must not import lightning or vector_quantize_pytorch."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; import heptokens.traced_modules; "
+        "bad = [m for m in ('lightning', 'vector_quantize_pytorch') if m in sys.modules]; "
+        "assert not bad, bad"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)

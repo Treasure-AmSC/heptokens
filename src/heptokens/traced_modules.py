@@ -24,13 +24,18 @@ With heptokens installed:
 
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import TYPE_CHECKING, Dict, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from heptokens.models.vq_vae import LitVqVae
+from heptokens.models.latent_bins import LatentBins  # torch-only
+
+if TYPE_CHECKING:
+    # Type-only: LitVqVae pulls in lightning and vector_quantize_pytorch, which the
+    # inference modules (and VqVaeKit) must not require at import time.
+    from heptokens.models.vq_vae import LitVqVae
 
 log = logging.getLogger(__name__)
 
@@ -117,7 +122,8 @@ class TensorEncoder(nn.Module):
         """
         B, T = x.shape[0], x.shape[1]
         z = self.mlp(x.reshape(B * T, x.shape[2])).reshape(B, T, -1)
-        return z * mask.unsqueeze(-1).to(z.dtype)
+        # masked_fill, not multiply: NaN/Inf at padded positions must still give zeros.
+        return z.masked_fill(~mask.unsqueeze(-1), 0.0)
 
 
 class TensorDecoder(nn.Module):
@@ -150,7 +156,7 @@ class TensorDecoder(nn.Module):
         """
         B, T = z_q.shape[0], z_q.shape[1]
         x_hat = self.mlp(z_q.reshape(B * T, z_q.shape[2])).reshape(B, T, -1)
-        return x_hat * mask.unsqueeze(-1).to(x_hat.dtype)
+        return x_hat.masked_fill(~mask.unsqueeze(-1), 0.0)
 
 
 class TensorIndexEncoder(nn.Module):
@@ -214,7 +220,7 @@ class TensorIndexEncoder(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def build_inference_modules(model: LitVqVae) -> Dict[str, nn.Module]:
+def build_inference_modules(model: "LitVqVae") -> Dict[str, nn.Module]:
     """Build the four scriptable inference modules from a trained VQ-VAE.
 
     Supports the standard ``Encoder`` / ``Decoder`` (``Coder``-based, with a
@@ -231,10 +237,17 @@ def build_inference_modules(model: LitVqVae) -> Dict[str, nn.Module]:
 
     Raises:
         NotImplementedError: If the encoder or decoder architecture is not
-            the standard ``Coder``-based MLP type.
+            the standard ``Coder``-based MLP type, or the model uses the
+            ``LatentBins`` bottleneck instead of a residual VQ.
     """
     encoder = model.encoder
     decoder = model.decoder
+
+    if isinstance(model.vector_quantization, LatentBins):
+        raise NotImplementedError(
+            "Cannot export traced modules: the LatentBins bottleneck is not yet supported "
+            "(the index encoder and codebook lookup assume a residual VQ)."
+        )
 
     if not (hasattr(encoder, "coder") and hasattr(encoder.coder, "model")):
         raise NotImplementedError(
@@ -271,7 +284,7 @@ def build_inference_modules(model: LitVqVae) -> Dict[str, nn.Module]:
     }
 
 
-def save_inference_modules(model: LitVqVae, output_dir: Path) -> Path:
+def save_inference_modules(model: "LitVqVae", output_dir: Path) -> Path:
     """Build, script, and save the four inference modules to ``output_dir/modules/``.
 
     Args:
