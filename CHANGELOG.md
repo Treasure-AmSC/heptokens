@@ -21,6 +21,11 @@
   RVQ with per-dimension uniform bins, with a `transformer_latent_bins` model config.
   Exports write one quantizer per latent dimension, and the exported codebooks reconstruct
   the binned latent.
+- **TorchScript inference modules** (#22): `heptokens-export` also writes scripted
+  `encoder.pt`, `decoder.pt`, `codebook_lookup.pt` and `index_encoder.pt` to
+  `<output_dir>/modules/`. They can be loaded with plain `torch.jit.load`, or through
+  `heptokens.traced_modules.VqVaeKit`. Models with custom coders or the `LatentBins`
+  bottleneck skip this step with a warning.
 - Continuous integration: lint and the test suite run on every pull request and on `main`.
 - `pixi run test` task.
 
