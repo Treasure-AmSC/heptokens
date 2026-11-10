@@ -53,6 +53,10 @@ class StructuredArrayHDF5Dataset(Dataset):
             ``label_key`` is not ``None``).
         num_samples: If set, only load the first ``num_samples`` events.
         num_elements: If set, only load the first ``num_elements`` set members.
+        position_features: Optional field names in ``set_group`` returned as a separate
+            ``output_positions_key`` tensor (positions-out); list them here instead of in
+            ``set_features``. ``None`` (default) adds no key.
+        output_positions_key: Output dict key for ``position_features``.
     """
 
     def __init__(
@@ -71,13 +75,17 @@ class StructuredArrayHDF5Dataset(Dataset):
         num_samples: int | None = None,
         num_elements: int | None = None,
         filter_fn: Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray] | None = None,
+        position_features: list[str] | None = None,
+        output_positions_key: str = "positions",
     ) -> None:
         super().__init__()
         self.output_obj_key = output_obj_key
         self.output_cst_key = output_cst_key
         self.output_mask_key = output_mask_key
         self.output_labels_key = output_labels_key
+        self.output_positions_key = output_positions_key
         self.label_key = label_key
+        position_features = list(position_features or [])
 
         with h5py.File(file_path, mode="r") as f:
             obj_node = f[obj_group]
@@ -119,6 +127,9 @@ class StructuredArrayHDF5Dataset(Dataset):
                 set_array = np.empty((n, nc, len(set_features)), dtype=np.float32)
                 for i, feat in enumerate(set_features):
                     set_array[:, :, i] = set_raw[feat][:, :nc]
+                pos_array = np.empty((n, nc, len(position_features)), dtype=np.float32)
+                for i, feat in enumerate(position_features):
+                    pos_array[:, :, i] = set_raw[feat][:, :nc]
                 mask_array = set_raw[mask_key][:, :nc]
             else:
                 total_elements = set_node[set_features[0]].shape[1]
@@ -130,6 +141,9 @@ class StructuredArrayHDF5Dataset(Dataset):
                 set_array = np.empty((n, nc, len(set_features)), dtype=np.float32)
                 for i, feat in enumerate(set_features):
                     set_array[:, :, i] = set_node[feat][:n, :nc]
+                pos_array = np.empty((n, nc, len(position_features)), dtype=np.float32)
+                for i, feat in enumerate(position_features):
+                    pos_array[:, :, i] = set_node[feat][:n, :nc]
                 mask_array = set_node[mask_key][:n, :nc]
 
         if filter_fn is not None:
@@ -137,6 +151,7 @@ class StructuredArrayHDF5Dataset(Dataset):
             n_before = n
             obj_array = obj_array[keep]
             set_array = set_array[keep]
+            pos_array = pos_array[keep]
             mask_array = mask_array[keep]
             if labels_array is not None:
                 labels_array = labels_array[keep]
@@ -147,6 +162,7 @@ class StructuredArrayHDF5Dataset(Dataset):
         self.set_data = torch.from_numpy(set_array)
         self.mask = torch.from_numpy(mask_array)
         self.labels = torch.from_numpy(labels_array) if labels_array is not None else None
+        self.positions = torch.from_numpy(pos_array) if position_features else None
 
         log.info(
             "Loaded %d events from %s (elements=%d, obj_feats=%d, set_feats=%d)",
@@ -168,6 +184,8 @@ class StructuredArrayHDF5Dataset(Dataset):
         }
         if self.labels is not None:
             sample[self.output_labels_key] = self.labels[idx]
+        if self.positions is not None:
+            sample[self.output_positions_key] = self.positions[idx]
         return sample
 
 
@@ -198,6 +216,9 @@ class StructuredArrayIterableDataset(IterableDataset):
         indices: If provided, only iterate over these row indices. Indices are
             sorted for efficient HDF5 access.
         chunk_size: Number of events loaded per HDF5 read call.
+        position_features: Optional field names in ``set_group`` yielded as a separate
+            ``output_positions_key`` tensor (positions-out). ``None`` adds no key.
+        output_positions_key: Output dict key for ``position_features``.
     """
 
     def __init__(
@@ -218,6 +239,8 @@ class StructuredArrayIterableDataset(IterableDataset):
         indices: np.ndarray | None = None,
         chunk_size: int = 1000,
         filter_fn: Callable[[np.ndarray, np.ndarray, np.ndarray], bool] | None = None,
+        position_features: list[str] | None = None,
+        output_positions_key: str = "positions",
     ) -> None:
         super().__init__()
         self.file_path = file_path
@@ -225,6 +248,8 @@ class StructuredArrayIterableDataset(IterableDataset):
         self.set_group = set_group
         self.obj_features = obj_features
         self.set_features = set_features
+        self.position_features = list(position_features or [])
+        self.output_positions_key = output_positions_key
         self.label_key = label_key
         self.mask_key = mask_key
         self.output_obj_key = output_obj_key
@@ -350,6 +375,12 @@ class StructuredArrayIterableDataset(IterableDataset):
                     )
                     for i, feat in enumerate(self.set_features):
                         set_chunk[:, :, i] = set_raw[feat][:, : self.num_elements]
+                    pos_chunk = np.empty(
+                        (len(chunk_idx), self.num_elements, len(self.position_features)),
+                        dtype=np.float32,
+                    )
+                    for i, feat in enumerate(self.position_features):
+                        pos_chunk[:, :, i] = set_raw[feat][:, : self.num_elements]
                     mask_chunk = set_raw[self.mask_key][:, : self.num_elements]
                 else:
                     set_chunk = np.empty(
@@ -358,6 +389,12 @@ class StructuredArrayIterableDataset(IterableDataset):
                     )
                     for i, feat in enumerate(self.set_features):
                         set_chunk[:, :, i] = set_node[feat][sel, : self.num_elements]
+                    pos_chunk = np.empty(
+                        (len(chunk_idx), self.num_elements, len(self.position_features)),
+                        dtype=np.float32,
+                    )
+                    for i, feat in enumerate(self.position_features):
+                        pos_chunk[:, :, i] = set_node[feat][sel, : self.num_elements]
                     mask_chunk = set_node[self.mask_key][sel, : self.num_elements]
 
                 for i in range(len(chunk_idx)):
@@ -372,6 +409,8 @@ class StructuredArrayIterableDataset(IterableDataset):
                     }
                     if labels_chunk is not None:
                         sample[self.output_labels_key] = labels_chunk[i]
+                    if self.position_features:
+                        sample[self.output_positions_key] = pos_chunk[i]
                     yield sample
 
 
