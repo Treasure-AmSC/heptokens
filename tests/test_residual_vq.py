@@ -1,9 +1,9 @@
-"""Dead-code revival in RevivingVectorQuantize / RevivingResidualVQ."""
+"""Dead-code revival in RevivingVectorQuantize, and the ResidualVQQuantizer built on it."""
 
 import torch
-from vector_quantize_pytorch import VectorQuantize
+from vector_quantize_pytorch import ResidualVQ, VectorQuantize
 
-from heptokens.models.vq_layers import RevivingResidualVQ, RevivingVectorQuantize
+from heptokens.models.quantizers import ResidualVQQuantizer, RevivingVectorQuantize
 
 DIM, K = 4, 8
 
@@ -49,18 +49,31 @@ def test_no_update_in_eval_mode():
 
 def test_residual_vq_output_is_sum_of_layer_quantizations():
     torch.manual_seed(0)
-    rvq = RevivingResidualVQ(
+    rvq = ResidualVQQuantizer(
         dim=DIM, codebook_size=K, num_quantizers=3, threshold_ema_dead_code=1.0
-    )
-    rvq.eval()
+    ).eval()
     x = torch.randn(2, 5, DIM)
-    quantized, indices, losses = rvq(x)
-    assert indices.shape == (3, 2, 5) and losses.shape == (3,)
-    expected = sum(
-        torch.nn.functional.embedding(indices[q], layer.embed.t())
-        for q, layer in enumerate(rvq.layers)
-    )
+    quantized, indices, loss = rvq(x)
+    assert indices.shape == (2, 5, 3) and loss.ndim == 0
+    codebooks = rvq.codebooks()
+    expected = sum(codebooks[q][indices[..., q]] for q in range(3))
     assert torch.allclose(quantized, expected, atol=1e-6)
+
+
+def test_residual_vq_state_dict_matches_vector_quantize_pytorch():
+    """Weights saved from vector_quantize_pytorch's ResidualVQ (heptokens < 0.2) load into
+    ResidualVQQuantizer unchanged and quantize identically."""
+    torch.manual_seed(0)
+    old = ResidualVQ(dim=DIM, codebook_size=K, num_quantizers=3).eval()
+    new = ResidualVQQuantizer(dim=DIM, codebook_size=K, num_quantizers=3).eval()
+    new.load_state_dict(old.state_dict())  # strict: same keys and shapes
+    x = torch.randn(2, 5, DIM)
+    z_old, idx_old, losses_old = old(x)
+    z_new, idx_new, loss_new = new(x)
+    assert torch.equal(z_new, z_old)
+    assert torch.equal(idx_new, idx_old.permute(1, 2, 0))
+    assert torch.equal(loss_new, losses_old.mean())
+    assert torch.equal(new.encode_indices(x), idx_new)
 
 
 def test_revival_samples_only_valid_positions():

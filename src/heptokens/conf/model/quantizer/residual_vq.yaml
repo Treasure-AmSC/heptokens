@@ -1,0 +1,9 @@
+---
+# Residual vector quantization (models/quantizers.py): num_quantizers tokens per element,
+# each one of codebook_size codes. threshold_ema_dead_code > 0 enables dead-code revival.
+_target_: heptokens.models.quantizers.ResidualVQQuantizer
+_partial_: true
+codebook_size: 512
+num_quantizers: 3
+commitment: 1.0
+threshold_ema_dead_code: 0.0

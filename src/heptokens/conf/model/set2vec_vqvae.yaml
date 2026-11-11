@@ -1,4 +1,7 @@
 ---
+defaults:
+  - quantizer: residual_vq
+  - _self_
 _target_: heptokens.models.vq_vae.LitVqVae
 encoder:
   _target_: heptokens.models.coders.Encoder
@@ -25,9 +28,7 @@ decoder:
     dim_feedforward: 512
     dropout: 0.
     activation: gelu
-codebook_size: 512
 codebook_dim: 12
-num_quantizers: 5
 learning_rate: 1e-3
 optimizer:
   _target_: torch.optim.Adam

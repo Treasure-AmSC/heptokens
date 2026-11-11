@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from heptokens.models.coders import BaseDecoder, CoderModel, Decoder, Encoder
+from heptokens.models.quantizers import LatentBins, ResidualVQIndexEncoder, ResidualVQQuantizer
 from heptokens.models.vq_vae import LitVqVae
 from heptokens.traced_modules import (
     CodebookLookup,
@@ -50,11 +51,7 @@ def indices_valid():
 
 def _make_index_encoder(simple_mlp, codebooks):
     """Helper: build a TensorIndexEncoder from fixtures."""
-    tensor_enc = TensorEncoder(simple_mlp)
-    embed_list = nn.ParameterList(
-        [nn.Parameter(codebooks[q].t().clone(), requires_grad=False) for q in range(Q)]
-    )  # each [D, K]
-    return TensorIndexEncoder(tensor_enc, embed_list)
+    return TensorIndexEncoder(TensorEncoder(simple_mlp), ResidualVQIndexEncoder(codebooks))
 
 
 def test_index_encoder_output_shape(simple_mlp, codebooks, valid_mask):
@@ -232,9 +229,8 @@ def tiny_vqvae():
     model = LitVqVae(
         encoder=partial(Encoder, model=partial(CoderModel, hidden_dims=[8, 16])),
         decoder=partial(Decoder, model=partial(CoderModel, hidden_dims=[16, 8])),
-        codebook_size=K,
+        quantizer=partial(ResidualVQQuantizer, codebook_size=K, num_quantizers=Q),
         codebook_dim=D,
-        num_quantizers=Q,
         data_sample={"csts": data_sample, "mask": torch.ones(1, T, dtype=torch.bool)},
     )
     model.eval()
@@ -318,14 +314,35 @@ def test_encoder_and_decoder_zero_masked_nan_inputs(simple_mlp, valid_mask):
     assert torch.all(x_hat[0, -2:] == 0)
 
 
-def test_build_inference_modules_raises_for_latent_bins(tiny_vqvae):
-    from heptokens.models.latent_bins import LatentBins
+@pytest.mark.parametrize(
+    "quantizer",
+    [
+        partial(ResidualVQQuantizer, codebook_size=K, num_quantizers=Q),
+        partial(LatentBins, num_bins=16, bin_range=4.0, noise_std_bins=0.29),
+    ],
+    ids=["residual_vq", "latent_bins"],
+)
+def test_traced_modules_reproduce_the_model(quantizer):
+    """The scripted index encoder gives the model's tokens and the lookup its z_q."""
+    torch.manual_seed(0)
+    model = LitVqVae(
+        encoder=partial(Encoder, model=partial(CoderModel, hidden_dims=[8, 16])),
+        decoder=partial(Decoder, model=partial(CoderModel, hidden_dims=[16, 8])),
+        quantizer=quantizer,
+        codebook_dim=D,
+        data_sample={"csts": torch.randn(1, T, 3), "mask": torch.ones(1, T, dtype=torch.bool)},
+    ).eval()
+    x = torch.randn(B, T, 3)
+    mask = torch.ones(B, T, dtype=torch.bool)
+    mask[0, -2:] = False
+    batch = {"csts": x, "mask": mask}
 
-    tiny_vqvae.vector_quantization = LatentBins(
-        dim=D, num_bins=8, bin_range=1.0, noise_std_bins=0.0
-    )
-    with pytest.raises(NotImplementedError, match="LatentBins"):
-        build_inference_modules(tiny_vqvae)
+    modules = build_inference_modules(model)
+    indices = modules["index_encoder"](x, mask)
+    z_q, _, _ = model.encode(batch)
+
+    assert torch.equal(indices, model.encode_indices(batch))
+    assert torch.allclose(modules["codebook_lookup"](indices)[mask], z_q[mask], atol=1e-6)
 
 
 def test_traced_modules_import_does_not_need_training_deps():

@@ -74,9 +74,13 @@ def train_cfg(hdf5_file, tmp_path):
                         "hidden_dims": [64, 32],
                     },
                 },
-                "codebook_size": 8,
                 "codebook_dim": 4,
-                "num_quantizers": 2,
+                "quantizer": {
+                    "_target_": "heptokens.models.quantizers.ResidualVQQuantizer",
+                    "_partial_": True,
+                    "codebook_size": 8,
+                    "num_quantizers": 2,
+                },
                 "learning_rate": 1e-3,
             },
             "trainer": {

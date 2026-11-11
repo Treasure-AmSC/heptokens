@@ -1,49 +1,42 @@
-"""PyTorch Lightning wrapper for VQ-VAE with ResidualVQ."""
+"""PyTorch Lightning wrapper for a VQ-VAE with a pluggable quantizer."""
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Dict, Tuple
 
 import torch
 from lightning import LightningModule
-from vector_quantize_pytorch import ResidualVQ
 
 from heptokens.models.coders import Decoder, Encoder
-from heptokens.models.latent_bins import LatentBins
+from heptokens.models.quantizers import Quantizer
 from heptokens.models.utils import ScheduledOptimiserMixin, compute_codebook_utilization
-from heptokens.models.vq_layers import RevivingResidualVQ
 
 log = logging.getLogger(__name__)
 
 
 class LitVqVae(ScheduledOptimiserMixin, LightningModule):
-    """Lightning Module wrapper for VQ-VAE with ResidualVQ.
+    """Lightning Module for a VQ-VAE: encoder -> quantizer -> decoder.
 
     Args:
-        encoder_hidden_dims: List of hidden dimensions for encoder MLP
-        decoder_hidden_dims: List of hidden dimensions for decoder MLP
-        codebook_size: Number of codes in each codebook
-        codebook_dim: Dimension of each code
-        num_quantizers: Number of residual quantizers
-        commitment_weight: Weight for commitment loss
+        encoder: Partial Encoder, called with input_dim, output_dim=codebook_dim, data_sample
+        decoder: Partial Decoder, called with input_dim=codebook_dim, output_dim, data_sample
+        quantizer: Partial :class:`~heptokens.models.quantizers.Quantizer`, called with
+            ``dim=codebook_dim``, e.g. ``partial(ResidualVQQuantizer, codebook_size=512,
+            num_quantizers=3)`` or ``partial(LatentBins, num_bins=4096, ...)``. In Hydra, a
+            ``quantizer:`` block (see ``conf/model/quantizer/``).
+        codebook_dim: Latent dimension: encoder output, quantizer and decoder input
         learning_rate: Learning rate for optimizer
         reconstruction_weight: Weight for reconstruction loss
         data_sample: Sample data for initialization (optional, for compatibility)
-        n_classes: Number of classes (optional, for compatibility)
-        latent_bins: LatentBins arguments (num_bins, bin_range, noise_std_bins) to bin the
-            codebook_dim latent dimensions instead of the ResidualVQ; codebook_size and
-            num_quantizers must then be None
-        **kwargs: Additional arguments passed to ResidualVQ
+        **kwargs: Extra hyperparameters (e.g. ``scheduler_interval``)
     """
 
     def __init__(
         self,
         encoder: Encoder,
         decoder: Decoder,
-        codebook_size: int | None = 1024,
+        quantizer: Callable[..., Quantizer],
         codebook_dim: int = 256,
-        num_quantizers: int | None = 8,
-        commitment_weight: float = 1.0,
         learning_rate: float = 1e-3,
         reconstruction_weight: float = 1.0,
         optimizer=None,
@@ -51,8 +44,6 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         input_key: str = "csts",
         mask_key: str | None = "mask",
         data_sample: torch.Tensor | dict = None,
-        threshold_ema_dead_code: float = 0.0,
-        latent_bins: Mapping | None = None,
         **kwargs,
     ):
         super().__init__()
@@ -60,7 +51,6 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
 
         self.learning_rate = learning_rate
         self.reconstruction_weight = reconstruction_weight
-        self.codebook_size = codebook_size
         self.mask_key = mask_key
 
         # Infer input dimension from data_sample if provided.
@@ -79,27 +69,20 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
         self.decoder = decoder(
             input_dim=codebook_dim, output_dim=input_dim, data_sample=data_sample
         )
+        self.vector_quantization = quantizer(dim=codebook_dim)
 
-        if latent_bins is not None:
-            assert codebook_size is None and num_quantizers is None, (
-                "latent_bins replaces the RVQ: leave codebook_size and num_quantizers unset"
-            )
-            self.vector_quantization = LatentBins(dim=codebook_dim, **latent_bins)
-            self.codebook_size = self.vector_quantization.num_bins
-        else:
-            # Vector quantization; threshold_ema_dead_code > 0 enables dead-code revival.
-            vq_kwargs = dict(
-                dim=codebook_dim,
-                codebook_size=codebook_size,
-                num_quantizers=num_quantizers,
-                commitment=commitment_weight,
-            )
-            if threshold_ema_dead_code > 0:
-                self.vector_quantization = RevivingResidualVQ(
-                    **vq_kwargs, threshold_ema_dead_code=threshold_ema_dead_code
-                )
-            else:
-                self.vector_quantization = ResidualVQ(**vq_kwargs)
+    @property
+    def codebook_size(self) -> int:
+        """Values each token can take."""
+        return self.vector_quantization.codebook_size
+
+    def _mask_indices(self, indices: torch.Tensor, batch: Dict[str, torch.Tensor]):
+        """Set tokens at padded positions to -1. The mask is optional; some modalities have
+        no padding, and mask_key may be None to disable masking entirely."""
+        mask = batch.get(self.mask_key)
+        if mask is not None:
+            indices = indices.masked_fill(~mask.unsqueeze(-1), -1)
+        return indices
 
     def encode(
         self, batch: Dict[str, torch.Tensor]
@@ -111,70 +94,25 @@ class LitVqVae(ScheduledOptimiserMixin, LightningModule):
                 and 'mask' tensor of shape [batch_size, n_csts]
 
         Returns:
-            z_q: Quantized embeddings of shape [n_valid, codebook_dim]
-            indices: Indices of shape [n_valid, num_quantizers]
-            commit_loss: Commitment loss tensor
+            z_q: Quantized embeddings of shape [batch_size, n_csts, codebook_dim]
+            indices: Tokens of shape [batch_size, n_csts, num_quantizers], -1 where masked
+            commit_loss: Scalar quantizer loss
         """
-
-        # Encode
         z_e = self.encoder(batch)  # [batch_size, n_csts, codebook_dim]
-
-        # Mask is optional; some modalities have no padding, and self.mask_key may be
-        # None to disable masking entirely.
-        mask = batch.get(self.mask_key)
-
-        # Quantize. Dead-code revival takes the mask so padding is never sampled as a code.
-        if isinstance(self.vector_quantization, RevivingResidualVQ):
-            z_q, indices_batched, commit_loss = self.vector_quantization(z_e, mask=mask)
-        else:
-            z_q, indices_batched, commit_loss = self.vector_quantization(z_e)
-
-        # Move dimensions [n_codes, batch_dim, n_csts] -> [batch_dim, n_csts, n_codes]
-        indices = indices_batched.permute(1, 2, 0).contiguous()
-        # Set masked positions to -1
-        if mask is not None:
-            indices = indices.masked_fill(~mask.unsqueeze(-1), -1)
-
-        return z_q, indices, commit_loss.mean()
+        # The quantizer gets the mask so training updates (e.g. dead-code revival) can
+        # ignore padding.
+        z_q, indices, commit_loss = self.vector_quantization(z_e, mask=batch.get(self.mask_key))
+        return z_q, self._mask_indices(indices, batch), commit_loss
 
     @torch.no_grad()
     def encode_indices(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        TODO: check if this exists in lucid rains.
-        if it does not, then a PR should be made there.
-
-        Fast index-only encoding that skips the one_hot allocation in VQ layers.
-
-        For large codebooks the F.one_hot tensor ([N*csts, codebook_size]) dominates
-        GPU memory even though it is only used for EMA updates during training.
-        This method computes indices via argmin directly.
+        """Tokens only, via the quantizer's inference path (no training state updates).
 
         Returns:
-            indices: [batch_size, n_csts, num_quantizers]
+            indices: [batch_size, n_csts, num_quantizers], -1 where masked
         """
-        if isinstance(self.vector_quantization, LatentBins):
-            return self.encode(batch)[1]  # no codebook search to skip
-        z_e = self.encoder(batch)  # [batch_size, n_csts, codebook_dim]
-        flat = z_e.reshape(-1, z_e.shape[-1])  # [N, dim]
-
-        residual = flat
-        all_indices = []
-        for layer in self.vector_quantization.layers:
-            dist = (
-                residual.pow(2).sum(1, keepdim=True)
-                - 2 * residual @ layer.embed
-                + layer.embed.pow(2).sum(0, keepdim=True)
-            )
-            embed_ind = (-dist).max(1).indices  # [N]
-            quantized = torch.nn.functional.embedding(embed_ind, layer.embed.t())
-            residual = residual - quantized
-            all_indices.append(embed_ind.view(*z_e.shape[:-1]))  # [batch, n_csts]
-
-        indices = torch.stack(all_indices, dim=-1)  # [batch, n_csts, num_quantizers]
-        mask = batch.get(self.mask_key)
-        if mask is not None:
-            indices = indices.masked_fill(~mask.unsqueeze(-1), -1)
-        return indices
+        indices = self.vector_quantization.encode_indices(self.encoder(batch))
+        return self._mask_indices(indices, batch)
 
     def decode(self, z_q: torch.Tensor, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode quantized embeddings.

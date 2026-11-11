@@ -148,7 +148,10 @@ For scripting or notebooks without Hydra:
 
 ```python
 from heptokens.data.structured_array import StructuredArrayHDF5Dataset
+from functools import partial
+
 from heptokens.models.vq_vae import LitVqVae
+from heptokens.models.quantizers import ResidualVQQuantizer
 from heptokens.models.coders import Encoder, Decoder
 import lightning as L
 from torch.utils.data import DataLoader
@@ -165,7 +168,8 @@ loader = DataLoader(ds, batch_size=256, shuffle=True)
 sample = next(iter(loader))["csts"]          # [B, N, 3]
 model = LitVqVae(
     encoder=Encoder, decoder=Decoder,
-    codebook_size=512, codebook_dim=64, num_quantizers=4,
+    quantizer=partial(ResidualVQQuantizer, codebook_size=512, num_quantizers=4),
+    codebook_dim=64,
     data_sample=sample,
 )
 
@@ -217,6 +221,7 @@ pixi run python -m heptokens.export_tokens -cd /path/to/my/configs datamodule=my
 | Group | Location | Description |
 |---|---|---|
 | `model` | `src/heptokens/conf/model/` | `vqvae`, `transformer_vqvae`, `classifier`, … |
+| `model/quantizer` | `src/heptokens/conf/model/quantizer/` | VQ-VAE bottleneck: `residual_vq` (default), `latent_bins`. Swap with e.g. `model/quantizer=latent_bins` |
 | `callbacks` | `src/heptokens/conf/callbacks/` | `pretrain`, `encode`, `classify`, … |
 
 `datamodule` is not bundled — it is experiment-specific. See `StructuredArrayModule` in `src/heptokens/data/structured_array.py` for the constructor args.
@@ -279,6 +284,7 @@ src/heptokens/
         collation.py, transforms.py
     models/
         vq_vae.py               # LitVqVae
+        quantizers.py           # Quantizer interface + ResidualVQQuantizer, LatentBins
         coders.py               # Encoder, Decoder (base classes + default MLP impl)
         new_modality_coders.py  # template for custom encoders/decoders
         classifier.py, transformer.py, …
@@ -294,7 +300,7 @@ profiles/                       # Slurm executor profiles for pixi tasks
 
 ## Adding a New Modality
 
-A modality is any input representation with its own data format, token definition, and reconstruction metric. The VQ-VAE core (`LitVqVae`, `ResidualVQ`) is modality-agnostic and never changes.
+A modality is any input representation with its own data format, token definition, and reconstruction metric. The VQ-VAE core (`LitVqVae` and its quantizer) is modality-agnostic and never changes.
 
 ### Token strategy
 
@@ -373,6 +379,41 @@ heptokens-train -cd /path/to/my/configs \
 - **Dense grids**: Make sure `N` (number of patches) is fixed across samples so batches stack without a mask.
 
 ---
+
+## Adding a New Quantizer
+
+The quantizer is the VQ-VAE bottleneck that turns encoder outputs into tokens. `LitVqVae`,
+token export and the TorchScript inference modules only use the `Quantizer` interface in
+`src/heptokens/models/quantizers.py`, so a new tokenization scheme is one class plus one config:
+
+```python
+from heptokens.models.quantizers import Quantizer
+
+class MyQuantizer(Quantizer):
+    def __init__(self, *, dim: int, ...):    # LitVqVae passes dim=codebook_dim
+        super().__init__()
+        self.num_quantizers = ...            # tokens per element (Q)
+        self.codebook_size = ...             # values per token (K)
+
+    def forward(self, z_e, mask=None):       # -> z_q [..., dim], indices [..., Q], scalar loss
+        ...
+
+    def codebooks(self):                     # -> [Q, K, dim]: z_q = sum_q codebooks[q, indices[..., q]]
+        ...
+
+    def index_encoder(self):                 # -> TorchScript-able nn.Module: z_e -> indices
+        ...
+```
+
+```yaml
+# src/heptokens/conf/model/quantizer/my_quantizer.yaml
+_target_: heptokens.models.my_quantizer.MyQuantizer
+_partial_: true
+# ... constructor arguments except dim
+```
+
+Then train with `model/quantizer=my_quantizer`. `ResidualVQQuantizer` and `LatentBins` are the
+reference implementations, and `SignQuantizer` in `tests/test_quantizers.py` is a minimal one.
 
 ## Preprocessing
 

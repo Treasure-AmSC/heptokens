@@ -1,0 +1,10 @@
+---
+# Latent binning (models/quantizers.py): codebook_dim tokens per element, one per latent
+# dimension, each one of num_bins uniform bins.
+_target_: heptokens.models.quantizers.LatentBins
+_partial_: true
+num_bins: 4096
+bin_range: 4.0
+# ~1/sqrt(12): the std of the rounding error (uniform over a bin), so the decoder
+# trains on perturbations the size of those the binning makes at evaluation
+noise_std_bins: 0.29

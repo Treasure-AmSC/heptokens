@@ -24,13 +24,11 @@ With heptokens installed:
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from heptokens.models.latent_bins import LatentBins  # torch-only
 
 if TYPE_CHECKING:
     # Type-only: LitVqVae pulls in lightning and vector_quantize_pytorch, which the
@@ -162,15 +160,12 @@ class TensorDecoder(nn.Module):
 class TensorIndexEncoder(nn.Module):
     """Encode inputs all the way to integer codebook indices.
 
-    Combines the encoder MLP with residual-VQ argmin quantization.
-    Stores codebook embed matrices as frozen parameters so the module is
-    self-contained after scripting.
+    Combines the encoder MLP with the quantizer's scriptable index encoder
+    (``Quantizer.index_encoder()``), so the module is self-contained after scripting.
 
     Args:
         encoder: A :class:`TensorEncoder` wrapping the trained encoder MLP.
-        embed_list: ``nn.ParameterList`` of ``[codebook_dim, codebook_size]``
-            tensors — one per quantizer (same layout as ``layer.embed`` in
-            ``vector_quantize_pytorch``).
+        quantizer: Module mapping ``z_e [..., codebook_dim]`` to ``[..., Q]`` int64 tokens.
 
     Usage::
 
@@ -179,13 +174,13 @@ class TensorIndexEncoder(nn.Module):
         # -1 at masked positions
     """
 
-    def __init__(self, encoder: TensorEncoder, embed_list: nn.ParameterList) -> None:
+    def __init__(self, encoder: TensorEncoder, quantizer: nn.Module) -> None:
         super().__init__()
         self.encoder = encoder
-        self.embeds = embed_list  # each [D, K]
+        self.quantizer = quantizer
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """Encode inputs to integer indices via argmin residual quantization.
+        """Encode inputs to integer indices.
 
         Args:
             x: ``[B, T, D_in]`` float input tensor.
@@ -194,24 +189,7 @@ class TensorIndexEncoder(nn.Module):
         Returns:
             ``[B, T, num_quantizers]`` int64 tensor; ``-1`` at masked positions.
         """
-        z_e = self.encoder(x, mask)  # [B, T, D]
-        B, T = x.shape[0], x.shape[1]
-        flat = z_e.reshape(B * T, z_e.shape[2])  # [B*T, D]
-        residual = flat.clone()
-
-        all_indices: List[torch.Tensor] = []
-        for embed in self.embeds:  # embed: [D, K]
-            dist = (
-                residual.pow(2).sum(1, keepdim=True)  # [N, 1]
-                - 2.0 * residual @ embed  # [N, K]
-                + embed.pow(2).sum(0, keepdim=True)  # [1, K]
-            )
-            idx = (-dist).max(1).indices  # [N] int64
-            quantized = F.embedding(idx, embed.t())  # [N, D]
-            residual = residual - quantized
-            all_indices.append(idx.reshape(B, T))
-
-        indices = torch.stack(all_indices, dim=-1)  # [B, T, Q]
+        indices = self.quantizer(self.encoder(x, mask))  # [B, T, Q]
         return indices.masked_fill(~mask.unsqueeze(-1), -1)
 
 
@@ -237,18 +215,10 @@ def build_inference_modules(model: "LitVqVae") -> Dict[str, nn.Module]:
 
     Raises:
         NotImplementedError: If the encoder or decoder architecture is not
-            the standard ``Coder``-based MLP type, or the model uses the
-            ``LatentBins`` bottleneck instead of a residual VQ.
+            the standard ``Coder``-based MLP type.
     """
     encoder = model.encoder
     decoder = model.decoder
-
-    if isinstance(model.vector_quantization, LatentBins):
-        raise NotImplementedError(
-            "Cannot export traced modules: the LatentBins bottleneck is not yet supported "
-            "(the index encoder and codebook lookup assume a residual VQ); see "
-            "https://github.com/Treasure-AmSC/heptokens/issues/25."
-        )
 
     if not (hasattr(encoder, "coder") and hasattr(encoder.coder, "model")):
         raise NotImplementedError(
@@ -260,22 +230,17 @@ def build_inference_modules(model: "LitVqVae") -> Dict[str, nn.Module]:
         raise NotImplementedError(
             f"Cannot export traced modules: decoder type {type(decoder).__name__!r} "
             "does not expose '.coder.model'. Only the default Coder-based MLP "
-            "decoder is supported (DiffusionDecoder is not yet supported)."
+            "decoder is supported."
         )
 
     tensor_encoder = TensorEncoder(encoder.coder.model)
     tensor_decoder = TensorDecoder(decoder.coder.model)
 
-    # codebooks: [Q, K, D] from extract_codebooks-compatible layout
-    vq = model.vector_quantization
-    codebooks = torch.stack([layer.embed.t().detach() for layer in vq.layers])  # [Q, K, D]
-    codebook_lookup = CodebookLookup(codebooks)
-
-    # embed_list: [D, K] per quantizer (same as layer.embed)
-    embed_list = nn.ParameterList(
-        [nn.Parameter(layer.embed.detach().clone(), requires_grad=False) for layer in vq.layers]
-    )
-    index_encoder = TensorIndexEncoder(tensor_encoder, embed_list)
+    quantizer = model.vector_quantization
+    # .to(): a quantizer may build codebooks on CPU (LatentBins has no parameters)
+    device = next(encoder.parameters()).device
+    codebook_lookup = CodebookLookup(quantizer.codebooks().detach().to(device))  # [Q, K, D]
+    index_encoder = TensorIndexEncoder(tensor_encoder, quantizer.index_encoder())
 
     return {
         "encoder": torch.jit.script(tensor_encoder),
